@@ -1,0 +1,19 @@
+{
+  "name": "aistudio-tts-bot",
+  "version": "1.0.0",
+  "description": "Batch TTS automation CLI for Google AI Studio using Playwright-core and Chrome CDP",
+  "type": "commonjs",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "inspect": "node src/index.js --inspect",
+    "retry-failed": "node src/index.js --retry-failed"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "playwright-core": "^1.52.0"
+  }
+}

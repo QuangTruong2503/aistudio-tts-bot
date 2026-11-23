@@ -1,0 +1,9 @@
+node_modules/
+.env
+logs/*.log
+logs/failed.json
+logs/published.json
+output/*.wav
+output/*.mp3
+output/*.ogg
+output/*.m4a
