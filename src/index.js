@@ -16,7 +16,14 @@ const {
   isFilePublished,
   recordPublishedFile,
 } = require('./fileManager');
-const { connectToAIStudio, safeDisconnect, inspectPage } = require('./browser');
+const {
+  connectToAIStudio,
+  safeDisconnect,
+  inspectPage,
+  ensureSpeechEditorReady,
+  getCurrentModel,
+  switchTtsModel,
+} = require('./browser');
 const { processSingleFile } = require('./automation');
 const { publishAudioToCms } = require('./publisher');
 
@@ -39,6 +46,7 @@ Tùy chọn:
   --no-publish           Chỉ tải file audio về output/, KHÔNG tự động đăng lên CMS
   --publish-only         Chỉ đăng các file audio có sẵn trong output/ lên CMS (không chạy TTS)
   --publish-url <url>    Ghi đè URL trang quản trị chương CMS
+  --model <name>         Chọn model TTS khởi đầu (tự xoay vòng qua danh sách trong config.js khi bị giới hạn)
   -h, --help             Hiển thị hướng dẫn này
 `);
 }
@@ -56,6 +64,7 @@ function parseArgs(argv) {
     publishEnabled: baseConfig.publish.enabled,
     publishOnly: false,
     publishUrl: baseConfig.publish.chaptersUrl,
+    model: null,
     help: false,
   };
 
@@ -82,6 +91,12 @@ function parseArgs(argv) {
         const next = argv[++i];
         if (!next) throw new Error('Thiếu URL sau --publish-url.');
         opts.publishUrl = next;
+        break;
+      }
+      case '--model': {
+        const next = argv[++i];
+        if (!next) throw new Error('Thiếu tên model sau --model.');
+        opts.model = next;
         break;
       }
       case '--parts': {
@@ -153,6 +168,36 @@ async function interruptibleSleep(ms, shouldStop) {
     await sleep(Math.min(step, remaining));
     remaining -= step;
   }
+}
+
+function pickNextAvailableModel(currentModel, triedOnPart, models, cooldownMap) {
+  if (!Array.isArray(models) || models.length <= 1) return null;
+  const now = Date.now();
+  const startIdx = Math.max(0, models.indexOf(currentModel));
+
+  for (let offset = 1; offset <= models.length; offset++) {
+    const candidate = models[(startIdx + offset) % models.length];
+    if (triedOnPart.has(candidate)) continue;
+    const coolUntil = cooldownMap.get(candidate) || 0;
+    if (coolUntil <= now) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function pickLeastCooledModel(models, cooldownMap) {
+  if (!Array.isArray(models) || models.length === 0) return null;
+  let best = models[0];
+  let bestTime = cooldownMap.get(best) || 0;
+  for (const m of models) {
+    const t = cooldownMap.get(m) || 0;
+    if (t < bestTime) {
+      bestTime = t;
+      best = m;
+    }
+  }
+  return best;
 }
 
 function getOutputAudioFiles(outputDir, supportedExtensions) {
@@ -321,9 +366,25 @@ async function main() {
       return;
     }
 
+    // Track active TTS model & per-model quota cooldowns
+    const ttsModels = Array.isArray(config.ttsModels) && config.ttsModels.length > 0
+      ? config.ttsModels
+      : [await getCurrentModel(page, config)];
+    let currentModel = await getCurrentModel(page, config);
+    const modelCooldownUntil = new Map();
+
+    if (opts.model && opts.model !== currentModel) {
+      await switchTtsModel(page, opts.model, config, logger);
+      currentModel = opts.model;
+    } else {
+      // Auto-dismiss Zero-State screen ("Create new dialog") if page opened on zero-state
+      await ensureSpeechEditorReady(page, config, logger, 10000);
+    }
+
     stats.total = files.length;
     logger.info(
-      `Bắt đầu batch: ${files.length} file .txt | Chia phần: ${config.splitParts} phần/file` +
+      `Bắt đầu batch: ${files.length} file .txt | Model: ${currentModel} (fallback: ${ttsModels.length} models)` +
+        ` | Chia phần: ${config.splitParts} phần/file` +
         ` | Input: ${config.inputDir} | Output: ${config.outputDir}` +
         (config.publish.enabled ? ` | Auto-Publish: ON (${config.publish.chaptersUrl})` : ' | Auto-Publish: OFF')
     );
@@ -447,10 +508,12 @@ async function main() {
 
         logger.info(`${partPrefix} -> bắt đầu tạo audio (${partText.length} ký tự)...`);
 
-        // Run TTS with retries & rate limit / verify handling
+        // Run TTS with retries, automatic model rotation on quota/rate-limit, and verify handling
         let savedAudioPath = null;
         let lastError = null;
         const maxAttempts = config.maxRetries + 1;
+        const triedModelsForPart = new Set([currentModel]);
+        let modelSwitches = 0;
 
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
           if (shouldStop()) break;
@@ -470,7 +533,7 @@ async function main() {
 
             savedAudioPath = result.savedPath;
             logger.success(
-              `${partPrefix} -> lưu thành công: ${path.basename(result.savedPath)} (${formatSize(result.sizeBytes)})`
+              `${partPrefix} [${currentModel}] -> lưu thành công: ${path.basename(result.savedPath)} (${formatSize(result.sizeBytes)})`
             );
             break;
           } catch (err) {
@@ -479,7 +542,9 @@ async function main() {
 
             const isAccountVerify = Boolean(err && err.isAccountVerify);
             const isQuota = Boolean(err && err.isQuota);
-            logger.error(`${partPrefix} -> lỗi (lần ${attempt}/${maxAttempts}): ${err.message}`);
+            logger.error(
+              `${partPrefix} [${currentModel}] -> lỗi (lần ${attempt}/${maxAttempts}): ${err.message}`
+            );
 
             if (isAccountVerify) {
               logger.error(
@@ -491,6 +556,38 @@ async function main() {
               break;
             }
 
+            if (isQuota && config.rotateModelOnQuotaError && ttsModels.length > 1) {
+              modelCooldownUntil.set(currentModel, Date.now() + (config.modelCooldownMs || 300000));
+              const nextModel = pickNextAvailableModel(
+                currentModel,
+                triedModelsForPart,
+                ttsModels,
+                modelCooldownUntil
+              );
+
+              if (nextModel && modelSwitches < ttsModels.length) {
+                logger.warn(
+                  `Model "${currentModel}" gặp giới hạn/quota -> tự động chuyển sang "${nextModel}" và thử lại ngay!`
+                );
+                try {
+                  await switchTtsModel(page, nextModel, config, logger);
+                  currentModel = nextModel;
+                  triedModelsForPart.add(nextModel);
+                  modelSwitches += 1;
+                  // Don't consume a retry attempt when switching to a fresh fallback model
+                  attempt -= 1;
+                  await interruptibleSleep(2000, shouldStop);
+                  continue;
+                } catch (switchErr) {
+                  logger.error(`Không thể chuyển sang model "${nextModel}": ${switchErr.message}`);
+                }
+              } else {
+                logger.warn(
+                  `Tất cả ${ttsModels.length} model TTS đều đã chạm giới hạn gần đây.`
+                );
+              }
+            }
+
             if (attempt < maxAttempts) {
               const waitMs = isQuota
                 ? config.rateLimitCooldownMs
@@ -500,10 +597,23 @@ async function main() {
 
               logger.warn(
                 isQuota
-                  ? `Phát hiện giới hạn quota/rate limit. Tạm nghỉ ${Math.round(waitMs / 1000)}s trước khi thử lại...`
+                  ? `Tạm nghỉ ${Math.round(waitMs / 1000)}s trước khi thử lại...`
                   : `Chờ ${Math.round(waitMs / 1000)}s trước khi thử lại lần ${attempt + 1}...`
               );
               await interruptibleSleep(waitMs, shouldStop);
+
+              // After waiting out cooldown, switch to the model with earliest cooldown expiry
+              if (isQuota && config.rotateModelOnQuotaError && ttsModels.length > 1 && !shouldStop()) {
+                const candidate = pickLeastCooledModel(ttsModels, modelCooldownUntil);
+                if (candidate && candidate !== currentModel) {
+                  try {
+                    await switchTtsModel(page, candidate, config, logger);
+                    currentModel = candidate;
+                  } catch (switchErr) {
+                    logger.warn(`Không thể chuyển sang model "${candidate}": ${switchErr.message}`);
+                  }
+                }
+              }
             } else if (isQuota && config.stopOnQuotaError) {
               stopBatchDueToQuota = true;
             }
@@ -575,10 +685,32 @@ async function main() {
         }
       }
 
-      // Random delay before next chapter
+      // Rotate to the next TTS model after each completed chapter to spread load evenly
       const hasMoreFiles =
         i < files.length - 1 && (opts.limit === null || processedFilesCount < opts.limit);
       if (hasMoreFiles && !shouldStop() && !stopBatchDueToVerify && !stopBatchDueToQuota) {
+        if (config.rotateModelPerChapter && ttsModels.length > 1) {
+          const nextModel =
+            pickNextAvailableModel(
+              currentModel,
+              new Set([currentModel]),
+              ttsModels,
+              modelCooldownUntil
+            ) || ttsModels[(Math.max(0, ttsModels.indexOf(currentModel)) + 1) % ttsModels.length];
+
+          if (nextModel && nextModel !== currentModel) {
+            logger.info(`Đã xong chương -> tự động xoay vòng model: "${currentModel}" -> "${nextModel}"`);
+            try {
+              await switchTtsModel(page, nextModel, config, logger);
+              currentModel = nextModel;
+            } catch (switchErr) {
+              logger.warn(
+                `Không thể đổi sang model "${nextModel}" sau chương (${switchErr.message}), tiếp tục dùng "${currentModel}".`
+              );
+            }
+          }
+        }
+
         const delayMs = randomBetween(config.minDelayMs, config.maxDelayMs);
         logger.info(`Nghỉ ${(delayMs / 1000).toFixed(1)}s trước khi xử lý chương tiếp theo...`);
         await interruptibleSleep(delayMs, shouldStop);

@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { resolveLocator } = require('./browser');
+const { resolveLocator, ensureSpeechEditorReady } = require('./browser');
 
 class GenerationError extends Error {
   constructor(message, { isQuota = false, isAccountVerify = false } = {}) {
@@ -82,10 +82,11 @@ async function takePreRunSnapshot(page, config) {
 }
 
 /**
- * Step 2: Fill text into the Speech Block input without triggering '<' tag autocomplete.
+ * Step 2: Fill text into the Speech Block input without triggering '<' or '[' tag autocomplete.
  */
 async function fillSpeechBlock(page, config, text, logger) {
-  const match = await resolveLocator(page, config.selectors.promptInput, { visibleOnly: true });
+  // Auto-exit Zero-State screen ("Create new dialog") if AI Studio reset to zero-state
+  const match = await ensureSpeechEditorReady(page, config, logger, 10000);
   if (!match) {
     throw new GenerationError(
       'Không tìm thấy ô nhập văn bản (promptInput). Hãy chạy --inspect để kiểm tra selector trong config.js.'

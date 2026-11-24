@@ -22,6 +22,18 @@ module.exports = {
   targetUrlPattern: process.env.TARGET_URL_PATTERN || 'aistudio.google.com/generate-speech',
   fallbackUrlPattern: 'aistudio.google.com',
 
+  // Danh sách model TTS theo thứ tự ưu tiên (tự động xoay vòng khi gặp giới hạn/quota)
+  ttsModels: [
+    'gemini-3.8-flash-tts',
+    'gemini-3.8-flash-lite-tts',
+    'gemini-3.1-flash-tts-preview',
+    // 'gemini-2.5-pro-preview-tts',
+    // 'gemini-2.5-flash-preview-tts',
+  ],
+  rotateModelOnQuotaError: envBool('ROTATE_MODEL_ON_QUOTA_ERROR', true),
+  rotateModelPerChapter: envBool('ROTATE_MODEL_PER_CHAPTER', true), // Tự động đổi sang model kế tiếp sau mỗi chương
+  modelCooldownMs: envInt('MODEL_COOLDOWN_MS', 300000), // 5 phút tạm nghỉ cho model vừa bị giới hạn
+
   // Directories
   inputDir: path.resolve(ROOT_DIR, 'input'),
   outputDir: path.resolve(ROOT_DIR, 'output'),
@@ -32,8 +44,8 @@ module.exports = {
   pollIntervalMs: envInt('POLL_INTERVAL_MS', 2000), // 2 seconds
   runStartTimeoutMs: envInt('RUN_START_TIMEOUT_MS', 15000), // 15 seconds
   downloadTimeoutMs: envInt('DOWNLOAD_TIMEOUT_MS', 60000), // 60 seconds
-  minDelayMs: envInt('MIN_DELAY_MS', 5000), // 5 seconds
-  maxDelayMs: envInt('MAX_DELAY_MS', 10000), // 10 seconds
+  minDelayMs: envInt('MIN_DELAY_MS', 3000), // 3 seconds
+  maxDelayMs: envInt('MAX_DELAY_MS', 7000), // 7 seconds
   maxRetries: envInt('MAX_RETRIES', 2),
   retryBackoffMs: [15000, 45000],
   rateLimitCooldownMs: envInt('RATE_LIMIT_COOLDOWN_MS', 60000), // 60 seconds
@@ -46,7 +58,7 @@ module.exports = {
   supportedAudioExtensions: ['.wav', '.mp3', '.ogg', '.m4a'],
 
   // Chia nhỏ file .txt thành nhiều phần để giảm tải render trên AI Studio
-  splitParts: envInt('SPLIT_PARTS', 8), // Mặc định chia 5 phần (đặt 1 để tắt)
+  splitParts: envInt('SPLIT_PARTS', 10), // Mặc định chia 10 phần (đặt 1 để tắt)
   minCharsPerSplit: envInt('MIN_CHARS_PER_SPLIT', 300), // Không chia vụn nếu file quá ngắn
 
   // CMS Auto-Publish (sau khi tải xong trọn bộ 1 chương)
@@ -54,7 +66,7 @@ module.exports = {
     enabled: envBool('PUBLISH_ENABLED', true),
     chaptersUrl:
       process.env.PUBLISH_URL ||
-      'http://localhost:5173/admin/stories/59a33778-f5e0-4937-b3e8-b5ee46542872/chapters',
+      'https://pnttaudio.netlify.app/admin/stories/59a33778-f5e0-4937-b3e8-b5ee46542872/chapters',
     maxWaitUploadMs: envInt('MAX_WAIT_UPLOAD_MS', 300000), // 5 phút (ghép phần + nén WAV -> M4A + upload R2)
     pollIntervalMs: 2000,
     autoMerge: envBool('PUBLISH_AUTO_MERGE', true), // Tự động ghép các phần _1, _2, ... thành 1 chương
@@ -139,32 +151,69 @@ module.exports = {
     'resource exhausted',
     'exceeded',
     'limit reached',
+    'daily limit',
+    'usage limit',
+    '429',
+    'try again later',
+    'overloaded',
   ],
 
   // Fallback Selectors (ordered from most specific to most general)
   selectors: {
+    // Màn hình khởi tạo Zero-State (xuất hiện khi mở mới hoặc đổi model)
+    zeroStateContainer: [
+      'ms-speech-zero-state[data-testid="tts-zero-state"]',
+      'ms-speech-zero-state',
+    ],
+    createNewDialogCard: [
+      '[actioncardtestid="create-new-dialog-card"]',
+      '[data-testid="create-new-dialog-card"]',
+      'ms-speech-zero-state button:has-text("Create new dialog")',
+      'ms-speech-zero-state :has-text("Create new dialog")',
+    ],
+
+    // Model selector (đổi model trực tiếp trong sidebar để hạn chế văng về Zero-State)
+    modelNameLabel: [
+      'ms-model-selector span[data-test-id="model-name"]',
+      'span[data-test-id="model-name"]',
+    ],
+    runSettingsToggle: [
+      'button[aria-label="Toggle run settings panel"]',
+      'button.runsettings-toggle-button',
+    ],
+    modelSelectorCard: [
+      'ms-model-selector button.model-selector-card',
+      'button.model-selector-card',
+    ],
+
     promptInput: [
-      'textarea[placeholder*="Type \'<\' for tags"]',
-      'textarea[placeholder*="Type \'<\'"]',
-      'textarea[placeholder*="gasp"]',
-      '[contenteditable="true"][aria-placeholder*="Type \'<\'"]',
-      '[contenteditable="true"][data-placeholder*="Type \'<\'"]',
-      '[contenteditable="true"][placeholder*="Type \'<\'"]',
+      // Composer mode (3.1 / 3.8 / 2.5) — tránh nhầm ô Scene & Sample Context
+      'ms-speech-block textarea[aria-label="Speech block text"]',
+      'ms-autosize-textarea.text-block textarea',
+      'div.speech-block-card textarea',
       'ms-speech-block textarea',
-      'ms-speech-block [contenteditable="true"]',
+      // Text mode (Transcript)
+      '.transcript-text textarea[aria-label="Enter a prompt"]',
+      'div.text-mode-container .transcript-text textarea',
+      // Placeholder fallbacks (3.8 dùng '<', 3.1 dùng '[')
+      'textarea[placeholder*="Type \'<\' for tags"]',
+      'textarea[placeholder*="Type \'[\' for tags"]',
+      'textarea[placeholder*="Type \'<\'"]',
+      'textarea[placeholder*="Type \'[\'"]',
+      'textarea[placeholder*="gasp"]',
+      'textarea[placeholder*="amused"]',
+      // Generic safe fallbacks (tuyệt đối loại trừ Scene & Sample Context)
       'ms-tts-prompt-input textarea',
-      'ms-tts-prompt-input [contenteditable="true"]',
-      'textarea[aria-label*="speech" i]',
-      'textarea[aria-label*="text" i]',
-      'main textarea',
-      'textarea',
+      'main textarea:not([aria-label="Scene"]):not([aria-label="Sample Context"])',
+      'textarea:not([aria-label="Scene"]):not([aria-label="Sample Context"])',
     ],
 
     runButton: [
+      'ms-audio-footer ms-run-button button',
+      'ms-run-button button',
       'button[aria-label="Run"]',
       'button[aria-label^="Run "]',
       'run-button button',
-      'ms-run-button button',
       'button.run-button',
       '[data-test-id="run-button"]',
       'button:has-text("Run"):has-text("Ctrl")',

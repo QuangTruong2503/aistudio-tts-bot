@@ -240,9 +240,212 @@ async function inspectPage(page, config, logger) {
   }
 }
 
+/**
+ * Dismiss any open sidebar overlay that might block clicks on the speech editor.
+ */
+async function dismissOverlaysIfPresent(page) {
+  const overlay = page.locator('div.sidebar-overlay').first();
+  if (await overlay.isVisible().catch(() => false)) {
+    await overlay.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(250);
+  }
+}
+
+/**
+ * Ensure the Speech Editor (promptInput) is mounted and ready.
+ * If AI Studio is showing the Zero-State screen (ms-speech-zero-state), automatically
+ * clicks "Create new dialog" to enter the editor.
+ */
+async function ensureSpeechEditorReady(page, config, logger, timeoutMs = 15000) {
+  const deadline = Date.now() + timeoutMs;
+  let clickedCreateDialog = false;
+
+  while (Date.now() < deadline) {
+    // 1. Check if promptInput is already visible
+    const promptMatch = await resolveLocator(page, config.selectors.promptInput, {
+      visibleOnly: true,
+    });
+    if (promptMatch) {
+      await dismissOverlaysIfPresent(page);
+      return promptMatch;
+    }
+
+    // 2. Check if Zero-State screen (ms-speech-zero-state) is shown -> click "Create new dialog"
+    if (!clickedCreateDialog) {
+      const zeroState = await resolveLocator(
+        page,
+        config.selectors.zeroStateContainer || ['ms-speech-zero-state'],
+        { visibleOnly: true }
+      );
+      if (zeroState) {
+        const createCard = await resolveLocator(
+          page,
+          config.selectors.createNewDialogCard || [
+            '[actioncardtestid="create-new-dialog-card"]',
+            'ms-speech-zero-state :has-text("Create new dialog")',
+          ],
+          { visibleOnly: true }
+        );
+        if (createCard) {
+          logger.info(
+            `Phát hiện màn hình Zero-State -> tự động bấm "Create new dialog" (${createCard.selector})...`
+          );
+          await createCard.locator.click({ timeout: 5000 }).catch(() => {});
+          clickedCreateDialog = true;
+          await page.waitForTimeout(600);
+          continue;
+        }
+      }
+    }
+
+    await page.waitForTimeout(400);
+  }
+
+  return null;
+}
+
+/**
+ * Read the currently active TTS model name from the DOM (span[data-test-id="model-name"])
+ * or fallback to the page URL (?model=...).
+ */
+async function getCurrentModel(page, config) {
+  try {
+    const labelMatch = await resolveLocator(
+      page,
+      config.selectors.modelNameLabel || ['span[data-test-id="model-name"]'],
+      { visibleOnly: false }
+    );
+    if (labelMatch) {
+      const txt = ((await labelMatch.locator.innerText().catch(() => '')) || '').trim();
+      if (txt && txt.includes('tts')) {
+        return txt;
+      }
+    }
+  } catch {
+    // Ignore DOM read error
+  }
+
+  try {
+    const u = new URL(page.url());
+    const fromUrl = u.searchParams.get('model');
+    if (fromUrl) return fromUrl;
+  } catch {
+    // Ignore URL parse error
+  }
+  return (config.ttsModels && config.ttsModels[0]) || 'gemini-3.8-flash-tts';
+}
+
+/**
+ * Try switching TTS model in-place via the right-sidebar Model Selector modal
+ * (avoids full page reload and minimizes Zero-State resets).
+ */
+async function trySwitchModelInPlace(page, targetModel, config, logger) {
+  // 1. Ensure model selector card is visible (expand right sidebar if collapsed)
+  let cardMatch = await resolveLocator(
+    page,
+    config.selectors.modelSelectorCard || ['ms-model-selector button.model-selector-card'],
+    { visibleOnly: true }
+  );
+
+  if (!cardMatch) {
+    const toggleMatch = await resolveLocator(
+      page,
+      config.selectors.runSettingsToggle || ['button[aria-label="Toggle run settings panel"]'],
+      { visibleOnly: true }
+    );
+    if (toggleMatch) {
+      await toggleMatch.locator.click({ timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(400);
+      cardMatch = await resolveLocator(
+        page,
+        config.selectors.modelSelectorCard || ['ms-model-selector button.model-selector-card'],
+        { visibleOnly: true }
+      );
+    }
+  }
+
+  if (!cardMatch) return false;
+
+  // 2. Open Model Selection sliding drawer
+  await cardMatch.locator.click({ timeout: 5000 });
+  await page.waitForTimeout(500);
+
+  // 3. Locate the target model row inside ms-model-carousel
+  const rowSelectors = [
+    `ms-model-carousel-row[id="model-carousel-row-models/${targetModel}"] button.content-button`,
+    `ms-model-carousel-row:has-text("${targetModel}") button.content-button`,
+    `mat-dialog-container button.content-button:has-text("${targetModel}")`,
+  ];
+
+  const rowMatch = await resolveLocator(page, rowSelectors, { visibleOnly: true });
+  if (!rowMatch) {
+    // Close modal cleanly before falling back to URL navigation
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(250);
+    await dismissOverlaysIfPresent(page);
+    return false;
+  }
+
+  logger.debug(`Đổi model trực tiếp qua Model Selector: ${rowMatch.selector}`);
+  await rowMatch.locator.click({ timeout: 5000 });
+  await page.waitForTimeout(600);
+  await dismissOverlaysIfPresent(page);
+  return true;
+}
+
+/**
+ * Switch the open Google AI Studio Speech Generation tab to a different TTS model.
+ * Strategy 1: In-place Model Selector modal; Strategy 2: URL navigation (?model=...).
+ * Always auto-dismisses the Zero-State screen ("Create new dialog") if it appears.
+ */
+async function switchTtsModel(page, targetModel, config, logger) {
+  logger.warn(`Đang chuyển đổi sang model TTS: ${targetModel} ...`);
+  await page.bringToFront().catch(() => {});
+
+  // Strategy 1: In-place Model Selector (no full page reload)
+  let switchedInPlace = false;
+  try {
+    switchedInPlace = await trySwitchModelInPlace(page, targetModel, config, logger);
+  } catch (err) {
+    logger.debug(`Đổi model qua UI modal không thành công (${err.message}), chuyển sang URL...`);
+  }
+
+  // Strategy 2: Fallback to URL navigation if in-place failed
+  if (!switchedInPlace) {
+    let nextUrl;
+    try {
+      const u = new URL(page.url());
+      if (!u.pathname.includes('generate-speech')) {
+        u.pathname = '/generate-speech';
+      }
+      u.searchParams.set('model', targetModel);
+      nextUrl = u.toString();
+    } catch {
+      nextUrl = `https://aistudio.google.com/generate-speech?model=${encodeURIComponent(targetModel)}`;
+    }
+
+    await page.goto(nextUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  }
+
+  // Wait for editor (and automatically click "Create new dialog" if Zero-State appeared!)
+  const ready = await ensureSpeechEditorReady(page, config, logger, 15000);
+  if (!ready) {
+    throw new Error(
+      `Chuyển sang model ${targetModel} nhưng không thấy ô nhập văn bản sau 15s (kể cả sau khi kiểm tra Zero-State).`
+    );
+  }
+
+  await page.waitForTimeout(600);
+  logger.success(`Đã chuyển sang model TTS: ${targetModel}`);
+  return true;
+}
+
 module.exports = {
   connectToAIStudio,
   safeDisconnect,
   resolveLocator,
   inspectPage,
+  ensureSpeechEditorReady,
+  getCurrentModel,
+  switchTtsModel,
 };
