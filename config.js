@@ -45,12 +45,16 @@ module.exports = {
   minAudioSizeBytes: 1024, // 1 KB minimum valid audio file
   supportedAudioExtensions: ['.wav', '.mp3', '.ogg', '.m4a'],
 
+  // Chia nhỏ file .txt thành nhiều phần để giảm tải render trên AI Studio
+  splitParts: envInt('SPLIT_PARTS', 5), // Mặc định chia 5 phần (đặt 1 để tắt)
+  minCharsPerSplit: envInt('MIN_CHARS_PER_SPLIT', 300), // Không chia vụn nếu file quá ngắn
+
   // CMS Auto-Publish (sau khi tải audio thành công)
   publish: {
     enabled: envBool('PUBLISH_ENABLED', true),
     chaptersUrl:
       process.env.PUBLISH_URL ||
-      'https://pnttaudio.netlify.app/admin/stories/59a33778-f5e0-4937-b3e8-b5ee46542872/chapters',
+      'http://localhost:5173/admin/stories/59a33778-f5e0-4937-b3e8-b5ee46542872/chapters',
     maxWaitUploadMs: envInt('MAX_WAIT_UPLOAD_MS', 300000), // 5 phút (nén WAV -> M4A + upload R2)
     pollIntervalMs: 2000,
     selectors: {

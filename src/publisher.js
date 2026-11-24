@@ -87,10 +87,13 @@ async function isButtonReady(locator) {
 }
 
 /**
- * Set a local file onto <input type="file"> using direct CDP DOM.setFileInputFiles
+ * Set one or more local files onto <input type="file"> using direct CDP DOM.setFileInputFiles
  * so large (30MB+) WAV files attach instantly without Playwright's 30s CDP buffer transfer timeout.
  */
-async function setFileInputFast(page, locator, filePath, logger) {
+async function setFileInputFast(page, locator, filePaths, logger) {
+  const resolvedPaths = (Array.isArray(filePaths) ? filePaths : [filePaths]).map((p) =>
+    path.resolve(p)
+  );
   let cdp;
   try {
     const handle = await locator.elementHandle({ timeout: 10000 });
@@ -114,16 +117,16 @@ async function setFileInputFast(page, locator, filePath, logger) {
     }
 
     await cdp.send('DOM.setFileInputFiles', {
-      files: [path.resolve(filePath)],
+      files: resolvedPaths,
       objectId,
     });
 
     await handle.dispose().catch(() => {});
-    logger.debug('Đã gán file trực tiếp qua CDP DOM.setFileInputFiles.');
+    logger.debug(`Đã gán ${resolvedPaths.length} file trực tiếp qua CDP DOM.setFileInputFiles.`);
     return;
   } catch (err) {
     logger.warn(`CDP DOM.setFileInputFiles thất bại (${err.message}), thử lại bằng locator.setInputFiles...`);
-    await locator.setInputFiles(filePath, { timeout: 120000 });
+    await locator.setInputFiles(resolvedPaths, { timeout: 120000 });
   } finally {
     if (cdp) {
       await cdp.detach().catch(() => {});
@@ -132,13 +135,20 @@ async function setFileInputFast(page, locator, filePath, logger) {
 }
 
 /**
- * Upload & publish a downloaded audio file to the CMS chapters page via Bulk Upload tab.
+ * Upload & publish one or more downloaded audio files to the CMS chapters page via Bulk Upload tab.
  */
-async function publishAudioToCms(browser, aiStudioPage, config, audioFilePath, logger, shouldStop) {
-  const publishUrl = config.publish.chaptersUrl;
-  const audioFileName = path.basename(audioFilePath);
+async function publishAudioToCms(browser, aiStudioPage, config, audioFilePaths, logger, shouldStop) {
+  const filesList = Array.isArray(audioFilePaths) ? audioFilePaths : [audioFilePaths];
+  if (filesList.length === 0) return { initialCount: null, currentCount: null };
 
-  logger.info(`Đang đăng "${audioFileName}" lên CMS: ${publishUrl}`);
+  const publishUrl = config.publish.chaptersUrl;
+  const fileNames = filesList.map((p) => path.basename(p));
+  const label =
+    fileNames.length === 1
+      ? `"${fileNames[0]}"`
+      : `${fileNames.length} file (${fileNames[0]} .. ${fileNames[fileNames.length - 1]})`;
+
+  logger.info(`Đang đăng ${label} lên CMS: ${publishUrl}`);
 
   const cmsPage = await getOrOpenPublishPage(browser, publishUrl, logger);
 
@@ -148,6 +158,7 @@ async function publishAudioToCms(browser, aiStudioPage, config, audioFilePath, l
     await ensureCmsAuthenticated(cmsPage, publishUrl);
 
     const initialCount = await readChapterCount(cmsPage, config);
+    const expectedMinCount = initialCount !== null ? initialCount + filesList.length : null;
     logger.debug(`Số chương hiện tại trên CMS: ${initialCount ?? 'không xác định'}`);
 
     // Switch to "Tải lên hàng loạt (Bulk Upload)" tab
@@ -180,12 +191,12 @@ async function publishAudioToCms(browser, aiStudioPage, config, audioFilePath, l
       throw new Error('Không tìm thấy <input type="file"> trong tab Tải lên hàng loạt.');
     }
 
-    logger.info(`Đang chọn file "${audioFileName}" vào Bulk Upload...`);
-    await setFileInputFast(cmsPage, fileInputMatch.locator, audioFilePath, logger);
+    logger.info(`Đang chọn ${label} vào Bulk Upload...`);
+    await setFileInputFast(cmsPage, fileInputMatch.locator, filesList, logger);
 
-    // Wait up to 5s for the upload/submit button to appear and become enabled (WAV metadata parsing)
+    // Wait up to 8s for the upload/submit button to appear and become enabled (WAV metadata parsing)
     let submitMatch = null;
-    const submitWaitDeadline = Date.now() + 5000;
+    const submitWaitDeadline = Date.now() + 8000;
     while (Date.now() < submitWaitDeadline) {
       const candidate = await resolveLocator(cmsPage, config.publish.selectors.uploadSubmitButton, {
         visibleOnly: true,
@@ -205,9 +216,10 @@ async function publishAudioToCms(browser, aiStudioPage, config, audioFilePath, l
       logger.info('Không thấy nút submit riêng (có thể CMS tự động tải lên sau khi chọn file), đang chờ hoàn tất...');
     }
 
-    // Wait for WAV -> AAC M4A compression + R2 upload + chapter DB save
+    // Wait for WAV -> AAC M4A compression + R2 upload + chapter DB save (scale timeout with file count)
     const startedAt = Date.now();
-    const deadline = startedAt + config.publish.maxWaitUploadMs;
+    const totalWaitMs = config.publish.maxWaitUploadMs * Math.max(1, filesList.length);
+    const deadline = startedAt + totalWaitMs;
     let lastLogAt = startedAt;
 
     while (Date.now() < deadline) {
@@ -216,10 +228,10 @@ async function publishAudioToCms(browser, aiStudioPage, config, audioFilePath, l
       }
 
       const currentCount = await readChapterCount(cmsPage, config);
-      if (initialCount !== null && currentCount !== null && currentCount > initialCount) {
+      if (expectedMinCount !== null && currentCount !== null && currentCount >= expectedMinCount) {
         const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);
         logger.success(
-          `Đăng thành công "${audioFileName}" lên CMS sau ${elapsedSec}s (số chương: ${initialCount} -> ${currentCount}).`
+          `Đăng thành công ${label} lên CMS sau ${elapsedSec}s (số chương: ${initialCount} -> ${currentCount}).`
         );
         return { initialCount, currentCount };
       }
@@ -241,13 +253,14 @@ async function publishAudioToCms(browser, aiStudioPage, config, audioFilePath, l
         lower.includes('lỗi khi tải') ||
         lower.includes('không thể tải lên')
       ) {
-        throw new Error(`CMS báo lỗi trong quá trình tải lên "${audioFileName}".`);
+        throw new Error(`CMS báo lỗi trong quá trình tải lên ${label}.`);
       }
 
       const isStillBusy =
         lower.includes('đang nén') ||
         lower.includes('đang tải lên') ||
         lower.includes('đang xử lý') ||
+        lower.includes('chờ xử lý') ||
         lower.includes('uploading') ||
         lower.includes('compressing') ||
         lower.includes('converting');
@@ -258,15 +271,20 @@ async function publishAudioToCms(browser, aiStudioPage, config, audioFilePath, l
         lower.includes('thành công') ||
         lower.includes('uploaded');
 
-      if (!isStillBusy && hasSuccessMarker) {
+      // Only trust text marker alone if we couldn't read initialCount (otherwise wait for chapter count)
+      if (expectedMinCount === null && !isStillBusy && hasSuccessMarker) {
         const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);
-        logger.success(`Đăng thành công "${audioFileName}" lên CMS sau ${elapsedSec}s.`);
+        logger.success(`Đăng thành công ${label} lên CMS sau ${elapsedSec}s.`);
         return { initialCount, currentCount };
       }
 
       if (Date.now() - lastLogAt >= 10000) {
         const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
-        logger.info(`Đang nén & tải "${audioFileName}" lên CMS... (${elapsedSec}s)`);
+        const countInfo =
+          initialCount !== null && currentCount !== null
+            ? ` | đã xong ${Math.max(0, currentCount - initialCount)}/${filesList.length}`
+            : '';
+        logger.info(`Đang nén & tải ${label} lên CMS... (${elapsedSec}s${countInfo})`);
         lastLogAt = Date.now();
       }
 
@@ -274,7 +292,7 @@ async function publishAudioToCms(browser, aiStudioPage, config, audioFilePath, l
     }
 
     throw new Error(
-      `Quá thời gian chờ đăng lên CMS (${Math.round(config.publish.maxWaitUploadMs / 1000)}s) cho "${audioFileName}".`
+      `Quá thời gian chờ đăng lên CMS (${Math.round(totalWaitMs / 1000)}s) cho ${label}.`
     );
   } finally {
     // Return focus to AI Studio tab for the next TTS chapter

@@ -74,6 +74,9 @@ node src/index.js
 # Chạy thử chỉ 2 file đầu tiên
 node src/index.js --limit 2
 
+# Tùy chỉnh số phần chia cho mỗi file .txt (mặc định chia 4 phần -> _1.wav .. _4.wav; đặt 1 để không chia)
+node src/index.js --parts 4
+
 # Chạy lại cả những file đã có sẵn trong output/
 node src/index.js --force
 

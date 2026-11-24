@@ -8,6 +8,7 @@ const {
   ensureDirectories,
   getInputFiles,
   readTextFile,
+  splitTextIntoParts,
   findExistingAudio,
   loadFailedEntries,
   recordFailedFile,
@@ -28,7 +29,8 @@ Cách sử dụng:
 
 Tùy chọn:
   --inspect              Kiểm tra và highlight các selector trên tab AI Studio (KHÔNG bấm Run)
-  --limit <N>            Chỉ xử lý tối đa N file (không tính file bỏ qua)
+  --limit <N>            Chỉ xử lý tối đa N file .txt (không tính file bỏ qua)
+  --parts <N>            Chia mỗi file .txt thành N phần (mặc định: ${baseConfig.splitParts}, đặt 1 để không chia)
   --force                Chạy lại cả những file đã có trong thư mục output / đã đăng
   --retry-failed         Chỉ chạy lại các file nằm trong logs/failed.json
   --input <dir>          Chỉ định thư mục chứa file .txt đầu vào
@@ -45,6 +47,7 @@ function parseArgs(argv) {
   const opts = {
     inspect: false,
     limit: null,
+    parts: baseConfig.splitParts,
     force: false,
     retryFailed: false,
     inputDir: baseConfig.inputDir,
@@ -79,6 +82,15 @@ function parseArgs(argv) {
         const next = argv[++i];
         if (!next) throw new Error('Thiếu URL sau --publish-url.');
         opts.publishUrl = next;
+        break;
+      }
+      case '--parts': {
+        const next = argv[++i];
+        const parsed = Number.parseInt(next, 10);
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+          throw new Error(`Giá trị --parts không hợp lệ: "${next}". Phải là số nguyên dương.`);
+        }
+        opts.parts = parsed;
         break;
       }
       case '--limit': {
@@ -184,6 +196,7 @@ async function main() {
     inputDir: opts.inputDir,
     outputDir: opts.outputDir,
     cdpUrl: opts.cdpUrl,
+    splitParts: opts.parts,
     publish: {
       ...baseConfig.publish,
       enabled: opts.publishEnabled,
@@ -234,6 +247,7 @@ async function main() {
   const stats = {
     total: 0,
     succeeded: 0,
+    partsSucceeded: 0,
     published: 0,
     skipped: 0,
     failed: 0,
@@ -292,7 +306,7 @@ async function main() {
       return;
     }
 
-    // Normal mode: TTS generation (+ optional auto-publish after each file)
+    // Normal mode: TTS generation (+ optional split into N parts + auto-publish)
     let files = getInputFiles(config.inputDir);
 
     if (opts.retryFailed) {
@@ -309,175 +323,275 @@ async function main() {
 
     stats.total = files.length;
     logger.info(
-      `Bắt đầu batch: ${files.length} file .txt | Input: ${config.inputDir} | Output: ${config.outputDir}` +
+      `Bắt đầu batch: ${files.length} file .txt | Chia phần: ${config.splitParts} phần/file` +
+        ` | Input: ${config.inputDir} | Output: ${config.outputDir}` +
         (config.publish.enabled ? ` | Auto-Publish: ON (${config.publish.chaptersUrl})` : ' | Auto-Publish: OFF')
     );
 
-    let processedCount = 0;
+    let processedFilesCount = 0;
 
     for (let i = 0; i < files.length; i++) {
       if (shouldStop()) break;
-      if (opts.limit !== null && processedCount >= opts.limit) {
-        logger.info(`Đã đạt giới hạn --limit ${opts.limit}. Dừng batch.`);
+      if (opts.limit !== null && processedFilesCount >= opts.limit) {
+        logger.info(`Đã đạt giới hạn --limit ${opts.limit} file. Dừng batch.`);
         break;
       }
 
       const file = files[i];
-      const prefix = `[${i + 1}/${files.length}] ${file.fileName}`;
+      const filePrefix = `[${i + 1}/${files.length}] ${file.fileName}`;
 
-      // 1. Check resume skip
-      let existingAudio = null;
+      // 1. Check if legacy unsplit audio already exists & is published (avoid re-doing old completed files)
       if (!opts.force) {
-        existingAudio = findExistingAudio(
+        const legacyAudio = findExistingAudio(
           config.outputDir,
           file.baseName,
           config.supportedAudioExtensions
         );
-        if (existingAudio) {
-          const alreadyPublished = !config.publish.enabled || isFilePublished(config.logsDir, file.baseName);
+        if (legacyAudio) {
+          const alreadyPublished =
+            !config.publish.enabled || isFilePublished(config.logsDir, file.baseName);
           if (alreadyPublished) {
-            logger.skip(`${prefix} -> đã có ${existingAudio.fileName} (${formatSize(existingAudio.size)})`);
+            logger.skip(`${filePrefix} -> đã có bản gộp ${legacyAudio.fileName} (${formatSize(legacyAudio.size)})`);
             stats.skipped += 1;
             clearFailedFile(config.logsDir, file.fileName);
             continue;
           }
-
-          // Audio exists on disk, only needs publishing
-          processedCount += 1;
-          logger.info(
-            `${prefix} -> đã có ${existingAudio.fileName}, bỏ qua TTS và tiến hành đăng lên CMS...`
-          );
-          try {
-            await publishAudioToCms(browser, page, config, existingAudio.path, logger, shouldStop);
-            recordPublishedFile(config.logsDir, {
-              baseName: file.baseName,
-              audioFileName: existingAudio.fileName,
-              publishUrl: config.publish.chaptersUrl,
-            });
-            clearFailedFile(config.logsDir, file.fileName);
-            stats.published += 1;
-            stats.succeeded += 1;
-          } catch (pubErr) {
-            logger.error(`${prefix} -> đăng lên CMS thất bại: ${pubErr.message}`);
-            recordFailedFile(config.logsDir, file.fileName, `Publish error: ${pubErr.message}`);
-            stats.failed += 1;
-          }
-          continue;
         }
       }
 
-      // 2. Read and validate text content
+      // 2. Read and split text content
       let text;
       try {
         text = readTextFile(file.fullPath);
       } catch (err) {
-        logger.error(`${prefix} -> không đọc được file: ${err.message}`);
+        logger.error(`${filePrefix} -> không đọc được file: ${err.message}`);
         recordFailedFile(config.logsDir, file.fileName, `Read error: ${err.message}`);
         stats.failed += 1;
         continue;
       }
 
       if (!text) {
-        logger.skip(`${prefix} -> file rỗng, bỏ qua.`);
+        logger.skip(`${filePrefix} -> file rỗng, bỏ qua.`);
         stats.skipped += 1;
         continue;
       }
 
-      processedCount += 1;
-      logger.info(`${prefix} -> bắt đầu xử lý (${text.length} ký tự)...`);
+      const parts = splitTextIntoParts(text, config.splitParts, config.minCharsPerSplit);
+      const useSuffix = config.splitParts > 1 && parts.length > 1;
 
-      // 3. Process TTS with retries & rate limit handling
-      let savedAudioPath = null;
-      let lastError = null;
+      // Check if all parts of this file are already completed (downloaded + published)
+      if (!opts.force) {
+        const allPartsDone = parts.every((_, idx) => {
+          const partBaseName = useSuffix ? `${file.baseName}_${idx + 1}` : file.baseName;
+          const existing = findExistingAudio(
+            config.outputDir,
+            partBaseName,
+            config.supportedAudioExtensions
+          );
+          if (!existing) return false;
+          return !config.publish.enabled || isFilePublished(config.logsDir, partBaseName);
+        });
+
+        if (allPartsDone) {
+          logger.skip(`${filePrefix} -> đã hoàn tất đủ ${parts.length}/${parts.length} phần.`);
+          stats.skipped += 1;
+          clearFailedFile(config.logsDir, file.fileName);
+          continue;
+        }
+      }
+
+      processedFilesCount += 1;
+      logger.info(
+        `${filePrefix} -> tổng ${text.length} ký tự, chia thành ${parts.length} phần` +
+          (useSuffix ? ` (${file.baseName}_1 .. _${parts.length})` : '')
+      );
+
+      let fileHasFailure = false;
+      let fileLastError = null;
       let stopBatchDueToQuota = false;
       let stopBatchDueToVerify = false;
 
-      const maxAttempts = config.maxRetries + 1;
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      // Collect all downloaded parts of this chapter; publish ONLY after all parts finish
+      const chapterPartAudios = [];
+
+      // Phase A: Generate & download ALL parts of this chapter first
+      for (let pIdx = 0; pIdx < parts.length; pIdx++) {
         if (shouldStop()) break;
 
-        try {
-          const result = await processSingleFile(
-            page,
-            config,
-            {
-              baseName: file.baseName,
-              text,
-              outputDir: config.outputDir,
-            },
-            logger,
-            shouldStop
-          );
+        const partNum = pIdx + 1;
+        const partText = parts[pIdx];
+        const partBaseName = useSuffix ? `${file.baseName}_${partNum}` : file.baseName;
+        const partPrefix = useSuffix
+          ? `${filePrefix} [Phần ${partNum}/${parts.length}]`
+          : filePrefix;
 
-          savedAudioPath = result.savedPath;
-          logger.success(
-            `${prefix} -> lưu thành công: ${path.basename(result.savedPath)} (${formatSize(result.sizeBytes)})`
+        // Check per-part audio on disk (skip TTS if already downloaded)
+        if (!opts.force) {
+          const existingPart = findExistingAudio(
+            config.outputDir,
+            partBaseName,
+            config.supportedAudioExtensions
           );
-          break;
-        } catch (err) {
-          lastError = err;
+          if (existingPart) {
+            logger.skip(
+              `${partPrefix} -> đã có sẵn ${existingPart.fileName} (${formatSize(existingPart.size)}), bỏ qua TTS.`
+            );
+            chapterPartAudios.push({
+              baseName: partBaseName,
+              fileName: existingPart.fileName,
+              fullPath: existingPart.path,
+            });
+            continue;
+          }
+        }
+
+        logger.info(`${partPrefix} -> bắt đầu tạo audio (${partText.length} ký tự)...`);
+
+        // Run TTS with retries & rate limit / verify handling
+        let savedAudioPath = null;
+        let lastError = null;
+        const maxAttempts = config.maxRetries + 1;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
           if (shouldStop()) break;
 
-          const isAccountVerify = Boolean(err && err.isAccountVerify);
-          const isQuota = Boolean(err && err.isQuota);
-          logger.error(`${prefix} -> lỗi (lần ${attempt}/${maxAttempts}): ${err.message}`);
-
-          if (isAccountVerify) {
-            logger.error(
-              'Google AI Studio yêu cầu xác minh tài khoản tại: https://aistudio.google.com/verify-account'
+          try {
+            const result = await processSingleFile(
+              page,
+              config,
+              {
+                baseName: partBaseName,
+                text: partText,
+                outputDir: config.outputDir,
+              },
+              logger,
+              shouldStop
             );
-            if (config.stopOnAccountVerifyError) {
-              stopBatchDueToVerify = true;
-            }
+
+            savedAudioPath = result.savedPath;
+            logger.success(
+              `${partPrefix} -> lưu thành công: ${path.basename(result.savedPath)} (${formatSize(result.sizeBytes)})`
+            );
             break;
+          } catch (err) {
+            lastError = err;
+            if (shouldStop()) break;
+
+            const isAccountVerify = Boolean(err && err.isAccountVerify);
+            const isQuota = Boolean(err && err.isQuota);
+            logger.error(`${partPrefix} -> lỗi (lần ${attempt}/${maxAttempts}): ${err.message}`);
+
+            if (isAccountVerify) {
+              logger.error(
+                'Google AI Studio yêu cầu xác minh tài khoản tại: https://aistudio.google.com/verify-account'
+              );
+              if (config.stopOnAccountVerifyError) {
+                stopBatchDueToVerify = true;
+              }
+              break;
+            }
+
+            if (attempt < maxAttempts) {
+              const waitMs = isQuota
+                ? config.rateLimitCooldownMs
+                : config.retryBackoffMs[attempt - 1] ||
+                  config.retryBackoffMs[config.retryBackoffMs.length - 1] ||
+                  30000;
+
+              logger.warn(
+                isQuota
+                  ? `Phát hiện giới hạn quota/rate limit. Tạm nghỉ ${Math.round(waitMs / 1000)}s trước khi thử lại...`
+                  : `Chờ ${Math.round(waitMs / 1000)}s trước khi thử lại lần ${attempt + 1}...`
+              );
+              await interruptibleSleep(waitMs, shouldStop);
+            } else if (isQuota && config.stopOnQuotaError) {
+              stopBatchDueToQuota = true;
+            }
           }
+        }
 
-          if (attempt < maxAttempts) {
-            const waitMs = isQuota
-              ? config.rateLimitCooldownMs
-              : config.retryBackoffMs[attempt - 1] ||
-                config.retryBackoffMs[config.retryBackoffMs.length - 1] ||
-                30000;
+        if (savedAudioPath && !shouldStop()) {
+          stats.partsSucceeded += 1;
+          chapterPartAudios.push({
+            baseName: partBaseName,
+            fileName: path.basename(savedAudioPath),
+            fullPath: savedAudioPath,
+          });
+        } else if (!savedAudioPath && !shouldStop()) {
+          fileHasFailure = true;
+          fileLastError = `Phần ${partNum}: ${lastError ? lastError.message : 'Unknown error'}`;
+        }
 
-            logger.warn(
-              isQuota
-                ? `Phát hiện giới hạn quota/rate limit. Tạm nghỉ ${Math.round(waitMs / 1000)}s trước khi thử lại...`
-                : `Chờ ${Math.round(waitMs / 1000)}s trước khi thử lại lần ${attempt + 1}...`
+        if (stopBatchDueToVerify || stopBatchDueToQuota) {
+          break;
+        }
+
+        // Random delay between parts on Google AI Studio
+        if (pIdx < parts.length - 1 && !shouldStop()) {
+          const delayMs = randomBetween(config.minDelayMs, config.maxDelayMs);
+          logger.info(`Nghỉ ${(delayMs / 1000).toFixed(1)}s trước khi tạo phần tiếp theo...`);
+          await interruptibleSleep(delayMs, shouldStop);
+        }
+      }
+
+      // Phase B: CMS Auto-Publish ONLY after all parts of the chapter are downloaded
+      if (
+        !fileHasFailure &&
+        !shouldStop() &&
+        config.publish.enabled &&
+        chapterPartAudios.length === parts.length
+      ) {
+        const toPublish = opts.force
+          ? chapterPartAudios
+          : chapterPartAudios.filter((item) => !isFilePublished(config.logsDir, item.baseName));
+
+        if (toPublish.length > 0) {
+          logger.info(
+            `${filePrefix} -> đã xong trọn bộ ${parts.length}/${parts.length} phần, tiến hành đăng ${toPublish.length} file lên CMS...`
+          );
+          try {
+            await publishAudioToCms(
+              browser,
+              page,
+              config,
+              toPublish.map((item) => item.fullPath),
+              logger,
+              shouldStop
             );
-            await interruptibleSleep(waitMs, shouldStop);
-          } else if (isQuota && config.stopOnQuotaError) {
-            stopBatchDueToQuota = true;
+            for (const item of toPublish) {
+              recordPublishedFile(config.logsDir, {
+                baseName: item.baseName,
+                audioFileName: item.fileName,
+                publishUrl: config.publish.chaptersUrl,
+              });
+              stats.published += 1;
+            }
+          } catch (pubErr) {
+            logger.error(`${filePrefix} -> tải xong đủ phần nhưng đăng lên CMS thất bại: ${pubErr.message}`);
+            fileHasFailure = true;
+            fileLastError = `Publish error: ${pubErr.message}`;
           }
         }
       }
 
-      // 4. Auto-publish to CMS after successful download
-      if (savedAudioPath && !shouldStop()) {
-        if (config.publish.enabled) {
-          try {
-            await publishAudioToCms(browser, page, config, savedAudioPath, logger, shouldStop);
-            recordPublishedFile(config.logsDir, {
-              baseName: file.baseName,
-              audioFileName: path.basename(savedAudioPath),
-              publishUrl: config.publish.chaptersUrl,
-            });
-            clearFailedFile(config.logsDir, file.fileName);
-            stats.published += 1;
-            stats.succeeded += 1;
-          } catch (pubErr) {
-            logger.error(`${prefix} -> tải audio OK nhưng đăng lên CMS thất bại: ${pubErr.message}`);
-            recordFailedFile(config.logsDir, file.fileName, `Publish error: ${pubErr.message}`);
-            stats.failed += 1;
-          }
+      // Random delay before next chapter
+      const hasMoreFiles =
+        i < files.length - 1 && (opts.limit === null || processedFilesCount < opts.limit);
+      if (hasMoreFiles && !shouldStop() && !stopBatchDueToVerify && !stopBatchDueToQuota) {
+        const delayMs = randomBetween(config.minDelayMs, config.maxDelayMs);
+        logger.info(`Nghỉ ${(delayMs / 1000).toFixed(1)}s trước khi xử lý chương tiếp theo...`);
+        await interruptibleSleep(delayMs, shouldStop);
+      }
+
+      if (!shouldStop()) {
+        if (fileHasFailure) {
+          recordFailedFile(config.logsDir, file.fileName, fileLastError || 'Part failed');
+          stats.failed += 1;
+          logger.error(`${filePrefix} -> có phần bị lỗi, đã ghi vào logs/failed.json.`);
         } else {
           clearFailedFile(config.logsDir, file.fileName);
           stats.succeeded += 1;
         }
-      } else if (!savedAudioPath && !shouldStop()) {
-        const reason = lastError ? lastError.message : 'Unknown error';
-        recordFailedFile(config.logsDir, file.fileName, reason);
-        stats.failed += 1;
-        logger.error(`${prefix} -> THẤT BẠI sau ${maxAttempts} lần thử. Đã ghi vào logs/failed.json.`);
       }
 
       if (stopBatchDueToVerify) {
@@ -491,21 +605,15 @@ async function main() {
         logger.error('Cấu hình stopOnQuotaError=true: dừng toàn bộ batch do lỗi quota.');
         break;
       }
-
-      // 5. Random delay before next file
-      const hasMore =
-        i < files.length - 1 && (opts.limit === null || processedCount < opts.limit);
-      if (hasMore && !shouldStop()) {
-        const delayMs = randomBetween(config.minDelayMs, config.maxDelayMs);
-        logger.info(`Nghỉ ${(delayMs / 1000).toFixed(1)}s trước khi xử lý file tiếp theo...`);
-        await interruptibleSleep(delayMs, shouldStop);
-      }
     }
   } finally {
     if (!opts.inspect) {
       logger.info('================ TỔNG KẾT ================');
       logger.info(`Tổng file quét : ${stats.total}`);
-      logger.success(`Thành công     : ${stats.succeeded}`);
+      logger.success(`File xong hết  : ${stats.succeeded}`);
+      if (config.splitParts > 1 && !opts.publishOnly) {
+        logger.success(`Phần đã tạo    : ${stats.partsSucceeded}`);
+      }
       if (config.publish.enabled) {
         logger.success(`Đã đăng CMS    : ${stats.published}`);
       }
