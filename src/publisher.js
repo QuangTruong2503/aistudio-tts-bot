@@ -5,20 +5,23 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function normalizeUrl(url) {
-  return String(url || '').replace(/\/+$/, '');
+function normalizeUrlBase(url) {
+  return String(url || '')
+    .split('?')[0]
+    .split('#')[0]
+    .replace(/\/+$/, '');
 }
 
 /**
  * Find an existing tab for the CMS chapters page or open a new tab in the same Chrome context.
  */
 async function getOrOpenPublishPage(browser, publishUrl, logger) {
-  const targetNorm = normalizeUrl(publishUrl);
+  const targetNorm = normalizeUrlBase(publishUrl);
   const contexts = browser.contexts();
 
   for (const context of contexts) {
     for (const p of context.pages()) {
-      if (normalizeUrl(p.url()).startsWith(targetNorm)) {
+      if (normalizeUrlBase(p.url()) === targetNorm) {
         logger.debug(`Tái sử dụng tab CMS đang mở: ${p.url()}`);
         await p.bringToFront().catch(() => {});
         return p;
@@ -62,7 +65,7 @@ async function ensureCmsAuthenticated(page, publishUrl) {
 }
 
 /**
- * Extract the current chapter count from the "Danh sách chương (N)" tab button.
+ * Extract the current chapter count from the "Danh sách chương 91" or "Danh sách chương (91)" tab button.
  */
 async function readChapterCount(page, config) {
   const match = await resolveLocator(page, config.publish.selectors.chaptersListTab, {
@@ -71,7 +74,7 @@ async function readChapterCount(page, config) {
   if (!match) return null;
 
   const text = ((await match.locator.innerText().catch(() => '')) || '').trim();
-  const m = text.match(/\((\d+)\)/);
+  const m = text.match(/(\d+)\s*\)?\s*$/);
   return m ? Number.parseInt(m[1], 10) : null;
 }
 
@@ -106,7 +109,8 @@ async function setFileInputFast(page, locator, filePaths, logger) {
 
     // Obtain RemoteObjectId for the <input type="file"> node via Runtime/DOM
     const remoteObject = await cdp.send('Runtime.evaluate', {
-      expression: 'document.querySelector(\'main input[type="file"]\') || document.querySelector(\'input[type="file"]\')',
+      expression:
+        'document.querySelector(\'div[role="tabpanel"] input[type="file"]\') || document.querySelector(\'main input[type="file"]\') || document.querySelector(\'input[type="file"]\')',
       returnByValue: false,
     });
 
@@ -135,9 +139,71 @@ async function setFileInputFast(page, locator, filePaths, logger) {
 }
 
 /**
- * Upload & publish one or more downloaded audio files to the CMS chapters page via Bulk Upload tab.
+ * Configure Auto-Merge checkbox, merge silence gap, and AAC bitrate in the Bulk Upload tab.
  */
-async function publishAudioToCms(browser, aiStudioPage, config, audioFilePaths, logger, shouldStop) {
+async function configureUploadOptions(cmsPage, config, logger) {
+  const { selectors, autoMerge, mergeGap, aacBitrate } = config.publish;
+
+  // 1. Auto-merge checkbox
+  let autoMergeChecked = Boolean(autoMerge);
+  if (selectors.autoMergeCheckbox) {
+    const cbMatch = await resolveLocator(cmsPage, selectors.autoMergeCheckbox, {
+      visibleOnly: true,
+    });
+    if (cbMatch) {
+      const isChecked = await cbMatch.locator.isChecked().catch(() => true);
+      if (isChecked !== autoMergeChecked) {
+        if (autoMergeChecked) {
+          await cbMatch.locator.check().catch(() => {});
+        } else {
+          await cbMatch.locator.uncheck().catch(() => {});
+        }
+        await cmsPage.waitForTimeout(200);
+      }
+      autoMergeChecked = await cbMatch.locator.isChecked().catch(() => autoMergeChecked);
+      logger.debug(`Auto-merge phần cùng chương: ${autoMergeChecked ? 'BẬT' : 'TẮT'}`);
+    }
+  }
+
+  // 2. Segment join silence dropdown (#merge-gap-select) — visible only when auto-merge is checked
+  if (autoMergeChecked && mergeGap && selectors.mergeGapSelect) {
+    const gapMatch = await resolveLocator(cmsPage, selectors.mergeGapSelect, { visibleOnly: true });
+    if (gapMatch) {
+      const curVal = await gapMatch.locator.inputValue().catch(() => '');
+      if (curVal !== String(mergeGap)) {
+        await gapMatch.locator.selectOption(String(mergeGap)).catch(() => {});
+      }
+    }
+  }
+
+  // 3. AAC bitrate dropdown (#aac-bitrate-select)
+  if (aacBitrate && selectors.aacBitrateSelect) {
+    const brMatch = await resolveLocator(cmsPage, selectors.aacBitrateSelect, {
+      visibleOnly: true,
+    });
+    if (brMatch) {
+      const curVal = await brMatch.locator.inputValue().catch(() => '');
+      if (curVal !== String(aacBitrate)) {
+        await brMatch.locator.selectOption(String(aacBitrate)).catch(() => {});
+      }
+    }
+  }
+
+  return { autoMergeChecked };
+}
+
+/**
+ * Upload & publish one or more downloaded audio files to the CMS chapters page via "Nhập chương / Upload".
+ */
+async function publishAudioToCms(
+  browser,
+  aiStudioPage,
+  config,
+  audioFilePaths,
+  logger,
+  shouldStop,
+  options = {}
+) {
   const filesList = Array.isArray(audioFilePaths) ? audioFilePaths : [audioFilePaths];
   if (filesList.length === 0) return { initialCount: null, currentCount: null };
 
@@ -158,21 +224,32 @@ async function publishAudioToCms(browser, aiStudioPage, config, audioFilePaths, 
     await ensureCmsAuthenticated(cmsPage, publishUrl);
 
     const initialCount = await readChapterCount(cmsPage, config);
-    const expectedMinCount = initialCount !== null ? initialCount + filesList.length : null;
     logger.debug(`Số chương hiện tại trên CMS: ${initialCount ?? 'không xác định'}`);
 
-    // Switch to "Tải lên hàng loạt (Bulk Upload)" tab
+    // Switch to "Nhập chương / Upload" tab (or legacy "Tải lên hàng loạt")
     const bulkTab = await resolveLocator(cmsPage, config.publish.selectors.bulkUploadTab, {
       visibleOnly: true,
     });
     if (!bulkTab) {
       throw new Error(
-        'Không tìm thấy tab "Tải lên hàng loạt (Bulk Upload)" trên trang CMS. Hãy kiểm tra lại URL hoặc selector trong config.js.'
+        'Không tìm thấy tab "Nhập chương / Upload" trên trang CMS. Hãy kiểm tra lại URL hoặc selector trong config.js.'
       );
     }
 
     await bulkTab.locator.click({ timeout: 10000 });
     await cmsPage.waitForTimeout(500);
+
+    // Ensure Auto-Merge, merge silence gap, and AAC bitrate match config
+    const { autoMergeChecked } = await configureUploadOptions(cmsPage, config, logger);
+
+    // When auto-merge is ON for 1 chapter's parts (_1.._4), CMS merges them into 1 single chapter (+1)
+    const expectedAdded =
+      typeof options.expectedChaptersAdded === 'number'
+        ? options.expectedChaptersAdded
+        : autoMergeChecked
+          ? 1
+          : filesList.length;
+    const expectedMinCount = initialCount !== null ? initialCount + expectedAdded : null;
 
     // Clear leftover queue from a previous run if button exists
     const clearBtn = await resolveLocator(cmsPage, config.publish.selectors.clearQueueButton, {
@@ -183,18 +260,18 @@ async function publishAudioToCms(browser, aiStudioPage, config, audioFilePaths, 
       await cmsPage.waitForTimeout(300);
     }
 
-    // Locate <input type="file"> (may be hidden inside dropzone)
+    // Locate <input type="file"> (hidden inside dropzone)
     const fileInputMatch = await resolveLocator(cmsPage, config.publish.selectors.fileInput, {
       visibleOnly: false,
     });
     if (!fileInputMatch) {
-      throw new Error('Không tìm thấy <input type="file"> trong tab Tải lên hàng loạt.');
+      throw new Error('Không tìm thấy <input type="file"> trong tab Nhập chương / Upload.');
     }
 
-    logger.info(`Đang chọn ${label} vào Bulk Upload...`);
+    logger.info(`Đang chọn ${label} vào tab Nhập chương / Upload...`);
     await setFileInputFast(cmsPage, fileInputMatch.locator, filesList, logger);
 
-    // Wait up to 8s for the upload/submit button to appear and become enabled (WAV metadata parsing)
+    // Wait up to 8s for the upload/submit button (e.g. "Bắt đầu (1)") to appear and become enabled
     let submitMatch = null;
     const submitWaitDeadline = Date.now() + 8000;
     while (Date.now() < submitWaitDeadline) {
@@ -216,9 +293,9 @@ async function publishAudioToCms(browser, aiStudioPage, config, audioFilePaths, 
       logger.info('Không thấy nút submit riêng (có thể CMS tự động tải lên sau khi chọn file), đang chờ hoàn tất...');
     }
 
-    // Wait for WAV -> AAC M4A compression + R2 upload + chapter DB save (scale timeout with file count)
+    // Wait for client-side multi-part merge + WAV -> AAC M4A compression + R2 upload + chapter DB save
     const startedAt = Date.now();
-    const totalWaitMs = config.publish.maxWaitUploadMs * Math.max(1, filesList.length);
+    const totalWaitMs = config.publish.maxWaitUploadMs * Math.max(1, expectedAdded);
     const deadline = startedAt + totalWaitMs;
     let lastLogAt = startedAt;
 
@@ -257,10 +334,12 @@ async function publishAudioToCms(browser, aiStudioPage, config, audioFilePaths, 
       }
 
       const isStillBusy =
+        lower.includes('đang ghép') ||
         lower.includes('đang nén') ||
         lower.includes('đang tải lên') ||
         lower.includes('đang xử lý') ||
         lower.includes('chờ xử lý') ||
+        lower.includes('merging') ||
         lower.includes('uploading') ||
         lower.includes('compressing') ||
         lower.includes('converting');
@@ -282,9 +361,9 @@ async function publishAudioToCms(browser, aiStudioPage, config, audioFilePaths, 
         const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
         const countInfo =
           initialCount !== null && currentCount !== null
-            ? ` | đã xong ${Math.max(0, currentCount - initialCount)}/${filesList.length}`
+            ? ` | số chương: ${currentCount}/${expectedMinCount}`
             : '';
-        logger.info(`Đang nén & tải ${label} lên CMS... (${elapsedSec}s${countInfo})`);
+        logger.info(`Đang ghép, nén & tải ${label} lên CMS... (${elapsedSec}s${countInfo})`);
         lastLogAt = Date.now();
       }
 

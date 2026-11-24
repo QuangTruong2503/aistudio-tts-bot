@@ -161,7 +161,7 @@ async function fillSpeechBlock(page, config, text, logger) {
 }
 
 /**
- * Detect visible error toasts / snackbars on the page.
+ * Detect visible error toasts / snackbars / inline stream errors on the page.
  */
 async function detectUiError(page, config) {
   for (const selector of config.selectors.errorToast) {
@@ -172,7 +172,7 @@ async function detectUiError(page, config) {
         const el = locator.nth(i);
         if (!(await el.isVisible().catch(() => false))) continue;
         const text = ((await el.innerText().catch(() => '')) || '').trim();
-        if (!text) continue;
+        if (!text || text.length > 600) continue;
 
         const lower = text.toLowerCase();
         const isAccountVerify = (config.accountVerifyKeywords || []).some((kw) => lower.includes(kw));
@@ -187,6 +187,33 @@ async function detectUiError(page, config) {
       // Ignore selector error
     }
   }
+
+  // Fallback check: catch high-confidence inline error messages anywhere in visible DOM
+  try {
+    const inlineErr = await page.evaluate(() => {
+      const text = document.body.innerText || '';
+      const lower = text.toLowerCase();
+      if (lower.includes('audio stream could not be completed')) {
+        return {
+          text: 'The audio stream could not be completed. Please retry your request.',
+          isQuota: false,
+          isAccountVerify: false,
+        };
+      }
+      if (lower.includes('your account must be verified') || lower.includes('aistudio.google.com/verify-account')) {
+        return {
+          text: 'Your account must be verified before it can continue using the Gemini API.',
+          isQuota: false,
+          isAccountVerify: true,
+        };
+      }
+      return null;
+    });
+    if (inlineErr) return inlineErr;
+  } catch {
+    // Ignore
+  }
+
   return null;
 }
 
@@ -203,6 +230,9 @@ async function triggerRun(page, config, snapshot, logger) {
     logger.warn('Nút Run chưa sẵn sàng để click, thử gửi phím tắt Ctrl/Cmd+Enter...');
     await page.keyboard.press(RUN_SHORTCUT);
   }
+
+  // Wait briefly so Angular clears any previous inline error banner before polling
+  await sleep(800);
 
   // Confirm generation actually started (or completed very fast)
   const startDeadline = Date.now() + config.runStartTimeoutMs;

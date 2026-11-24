@@ -46,28 +46,45 @@ module.exports = {
   supportedAudioExtensions: ['.wav', '.mp3', '.ogg', '.m4a'],
 
   // Chia nhỏ file .txt thành nhiều phần để giảm tải render trên AI Studio
-  splitParts: envInt('SPLIT_PARTS', 5), // Mặc định chia 5 phần (đặt 1 để tắt)
+  splitParts: envInt('SPLIT_PARTS', 8), // Mặc định chia 5 phần (đặt 1 để tắt)
   minCharsPerSplit: envInt('MIN_CHARS_PER_SPLIT', 300), // Không chia vụn nếu file quá ngắn
 
-  // CMS Auto-Publish (sau khi tải audio thành công)
+  // CMS Auto-Publish (sau khi tải xong trọn bộ 1 chương)
   publish: {
     enabled: envBool('PUBLISH_ENABLED', true),
     chaptersUrl:
       process.env.PUBLISH_URL ||
       'http://localhost:5173/admin/stories/59a33778-f5e0-4937-b3e8-b5ee46542872/chapters',
-    maxWaitUploadMs: envInt('MAX_WAIT_UPLOAD_MS', 300000), // 5 phút (nén WAV -> M4A + upload R2)
+    maxWaitUploadMs: envInt('MAX_WAIT_UPLOAD_MS', 300000), // 5 phút (ghép phần + nén WAV -> M4A + upload R2)
     pollIntervalMs: 2000,
+    autoMerge: envBool('PUBLISH_AUTO_MERGE', true), // Tự động ghép các phần _1, _2, ... thành 1 chương
+    mergeGap: process.env.PUBLISH_MERGE_GAP || '0.4', // '0' | '0.4' | '0.8'
+    aacBitrate: process.env.PUBLISH_AAC_BITRATE || '48k', // '48k' | '64k' | '96k' | '128k'
     selectors: {
       bulkUploadTab: [
+        'button[role="tab"]:has-text("Nhập chương / Upload")',
+        'button[role="tab"]:has-text("Nhập chương")',
+        'main button:has-text("Nhập chương / Upload")',
         'main button:has-text("Tải lên hàng loạt")',
-        'button:has-text("Tải lên hàng loạt")',
         'button:has-text("Bulk Upload")',
       ],
       chaptersListTab: [
+        'button[role="tab"]:has-text("Danh sách chương")',
         'main button:has-text("Danh sách chương")',
         'button:has-text("Danh sách chương")',
       ],
+      autoMergeCheckbox: [
+        'main label:has-text("Tự động nhận diện & ghép") input[type="checkbox"]',
+        'div[role="tabpanel"] input[type="checkbox"]',
+      ],
+      mergeGapSelect: [
+        '#merge-gap-select',
+      ],
+      aacBitrateSelect: [
+        '#aac-bitrate-select',
+      ],
       fileInput: [
+        'div[role="tabpanel"] input[type="file"]',
         'main input[type="file"]',
         'input[type="file"]',
       ],
@@ -80,8 +97,8 @@ module.exports = {
         'main button:has-text("Đăng chương")',
         'main button:has-text("Lưu chương")',
         'main button[type="submit"]',
-        'main button:has-text("Tải lên"):not(:has-text("hàng loạt")):not(:has-text("Bulk Upload"))',
-        'main button:has-text("Upload"):not(:has-text("hàng loạt")):not(:has-text("Bulk Upload"))',
+        'main button:has-text("Tải lên"):not(:has-text("hàng loạt")):not(:has-text("Bulk Upload")):not(:has-text("Nhập chương"))',
+        'main button:has-text("Upload"):not(:has-text("hàng loạt")):not(:has-text("Bulk Upload")):not(:has-text("Nhập chương"))',
       ],
       clearQueueButton: [
         'main button:has-text("Xóa danh sách")',
@@ -96,6 +113,8 @@ module.exports = {
     'verify your account',
     'must be verified',
     'verify-account',
+    'audio stream could not be completed',
+    'please retry your request',
     'quota',
     'rate limit',
     'too many requests',
@@ -203,6 +222,9 @@ module.exports = {
       '[role="alert"]',
       '.error-banner',
       '.error-message',
+      '.error-container',
+      'ms-error-message',
+      '[class*="error"]',
     ],
   },
 };

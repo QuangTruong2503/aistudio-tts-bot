@@ -556,7 +556,8 @@ async function main() {
               config,
               toPublish.map((item) => item.fullPath),
               logger,
-              shouldStop
+              shouldStop,
+              { expectedChaptersAdded: config.publish.autoMerge ? 1 : toPublish.length }
             );
             for (const item of toPublish) {
               recordPublishedFile(config.logsDir, {
