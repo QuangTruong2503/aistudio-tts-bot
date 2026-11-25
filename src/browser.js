@@ -1,3 +1,8 @@
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const http = require('http');
+const { spawn } = require('child_process');
 const { chromium } = require('playwright-core');
 
 /**
@@ -252,9 +257,67 @@ async function dismissOverlaysIfPresent(page) {
 }
 
 /**
- * Ensure the Speech Editor (promptInput) is mounted and ready.
+ * Remove any extra speech blocks beyond the first one so the editor always has strictly 1 speaker.
+ * Uses a real mouse pointer click on the delete button's bounding box because Angular's block focus
+ * activation can intercept synthetic locator.click() calls on inactive blocks.
+ */
+async function ensureSingleSpeechBlock(page, logger) {
+  try {
+    const blocks = page.locator('ms-speech-block');
+    let count = await blocks.count();
+    if (count <= 1) return;
+
+    logger.warn(`Phát hiện ${count} khối Speaker trên trang -> tự động xóa bớt về 1 Speaker duy nhất...`);
+
+    let guard = 0;
+    while (count > 1 && guard < 15) {
+      guard += 1;
+      const lastBlock = blocks.nth(count - 1);
+      await lastBlock.scrollIntoViewIfNeeded().catch(() => {});
+      await lastBlock.hover().catch(() => {});
+      await page.waitForTimeout(150);
+
+      const delBtn = lastBlock.locator('button[aria-label="Delete speech block"]').first();
+      if (!(await delBtn.isVisible().catch(() => false))) {
+        // Click block once to reveal its toolbar if needed
+        await lastBlock.click({ position: { x: 20, y: 20 } }).catch(() => {});
+        await page.waitForTimeout(150);
+      }
+
+      const box = await delBtn.boundingBox().catch(() => null);
+      if (box) {
+        await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+      } else {
+        await delBtn.click({ force: true }).catch(() => {});
+      }
+
+      await page.waitForTimeout(300);
+      const nextCount = await blocks.count();
+      if (nextCount >= count) {
+        // Fallback: retry pointer click once more in case first click only focused the block
+        const box2 = await delBtn.boundingBox().catch(() => null);
+        if (box2) {
+          await page.mouse.click(box2.x + box2.width / 2, box2.y + box2.height / 2);
+          await page.waitForTimeout(300);
+        }
+      }
+      count = await blocks.count();
+    }
+
+    if (count === 1) {
+      logger.success('Đã dọn sạch về đúng 1 Speaker duy nhất.');
+    } else {
+      logger.warn(`Vẫn còn ${count} khối Speaker sau khi dọn.`);
+    }
+  } catch (err) {
+    logger.warn(`Không thể dọn bớt khối Speaker thừa: ${err.message}`);
+  }
+}
+
+/**
+ * Ensure the Speech Editor (promptInput) is mounted and ready with strictly 1 speech block.
  * If AI Studio is showing the Zero-State screen (ms-speech-zero-state), automatically
- * clicks "Create new dialog" to enter the editor.
+ * clicks the exact "Create new dialog" card ([data-testid="create-new-dialog-card"]).
  */
 async function ensureSpeechEditorReady(page, config, logger, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;
@@ -267,10 +330,11 @@ async function ensureSpeechEditorReady(page, config, logger, timeoutMs = 15000) 
     });
     if (promptMatch) {
       await dismissOverlaysIfPresent(page);
+      await ensureSingleSpeechBlock(page, logger);
       return promptMatch;
     }
 
-    // 2. Check if Zero-State screen (ms-speech-zero-state) is shown -> click "Create new dialog"
+    // 2. Check if Zero-State screen (ms-speech-zero-state) is shown -> click exact "Create new dialog" card
     if (!clickedCreateDialog) {
       const zeroState = await resolveLocator(
         page,
@@ -281,8 +345,9 @@ async function ensureSpeechEditorReady(page, config, logger, timeoutMs = 15000) 
         const createCard = await resolveLocator(
           page,
           config.selectors.createNewDialogCard || [
-            '[actioncardtestid="create-new-dialog-card"]',
-            'ms-speech-zero-state :has-text("Create new dialog")',
+            'mat-card[data-testid="create-new-dialog-card"]',
+            '[data-testid="create-new-dialog-card"]',
+            'mat-card.create-dialog-card',
           ],
           { visibleOnly: true }
         );
@@ -440,12 +505,390 @@ async function switchTtsModel(page, targetModel, config, logger) {
   return true;
 }
 
+/**
+ * Ensure a specific voice (e.g. "Puck", "Zephyr", "Kore") is selected on the current AI Studio tab.
+ * If voiceName is empty, keeps whatever voice is currently active on the page.
+ */
+async function ensureVoiceSelected(page, voiceName, config, logger) {
+  const targetVoice = String(voiceName || '').trim();
+  if (!targetVoice) return false;
+
+  const targetLower = targetVoice.toLowerCase();
+
+  // 1. Quick check: read current voice chip label (e.g. "Speaker 1 - Puck")
+  const chipSelectors = config.selectors.voiceChipButton || [
+    'ms-speech-block button.voice-chip',
+    'ms-voice-settings button.active-voice-card-trigger',
+  ];
+  const chipMatch = await resolveLocator(page, chipSelectors, { visibleOnly: true });
+  if (!chipMatch) {
+    logger.debug(`Không tìm thấy nút chọn giọng để đặt "${targetVoice}", giữ giọng mặc định.`);
+    return false;
+  }
+
+  const chipText = ((await chipMatch.locator.innerText().catch(() => '')) || '').trim();
+  if (chipText.toLowerCase().includes(targetLower)) {
+    logger.debug(`Giọng đọc hiện tại đã khớp "${targetVoice}" (${chipText}).`);
+    return true;
+  }
+
+  logger.info(`Đang chọn giọng đọc cố định: "${targetVoice}" (hiện tại: "${chipText || 'chưa rõ'}")...`);
+
+  try {
+    await chipMatch.locator.click({ timeout: 5000 });
+    await page.waitForTimeout(500);
+
+    // 2. If Speaker Settings panel has a search input, filter by voice name
+    const searchSelectors = config.selectors.voiceSearchInput || [
+      'ms-speaker-settings-panel input[placeholder="Search voices"]',
+      'input[aria-label="Search voices"]',
+    ];
+    const searchMatch = await resolveLocator(page, searchSelectors, { visibleOnly: true });
+    if (searchMatch) {
+      await searchMatch.locator.fill('');
+      await page.waitForTimeout(150);
+      await searchMatch.locator.fill(targetVoice);
+      await page.waitForTimeout(400);
+    }
+
+    // 3. Click the matching voice item in the available voices list / dropdown menu
+    const voiceOptionSelectors = [
+      `ms-speaker-settings-panel section.voice-list button:has-text("${targetVoice}")`,
+      `ms-speaker-settings-panel [role="option"]:has-text("${targetVoice}")`,
+      `ms-speaker-settings-panel [class*="voice-card"]:has-text("${targetVoice}")`,
+      `ms-speaker-settings-panel button:has-text("${targetVoice}"):not(.voice-chip)`,
+      `button[mat-menu-item]:has-text("${targetVoice}")`,
+      `mat-option:has-text("${targetVoice}")`,
+      `.cdk-overlay-container [role="menuitem"]:has-text("${targetVoice}")`,
+      `.cdk-overlay-container [role="option"]:has-text("${targetVoice}")`,
+    ];
+
+    const optionMatch = await resolveLocator(page, voiceOptionSelectors, { visibleOnly: true });
+    if (optionMatch) {
+      await optionMatch.locator.click({ timeout: 5000 });
+      await page.waitForTimeout(400);
+      logger.success(`Đã chọn giọng đọc: "${targetVoice}"`);
+    } else {
+      logger.warn(`Không tìm thấy giọng "${targetVoice}" trong danh sách giọng đọc AI Studio.`);
+    }
+  } catch (err) {
+    logger.warn(`Lỗi khi chọn giọng "${targetVoice}": ${err.message}`);
+  } finally {
+    // Clear search filter if left behind and close speaker panel cleanly
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(250);
+    await dismissOverlaysIfPresent(page);
+  }
+
+  return true;
+}
+
+/**
+ * Ensure a specific speaking style (e.g. "Podcast", "Friendly") is selected on the speech block.
+ * Works with the inline Style dropdown next to "Speaker 1 - Nika" (as on Gemini 3.8 TTS)
+ * and falls back gracefully if the current model doesn't expose that style.
+ */
+async function ensureStyleSelected(page, styleName, config, logger) {
+  const targetStyle = String(styleName || '').trim();
+  if (!targetStyle) return false;
+
+  const targetLower = targetStyle.toLowerCase();
+
+  const styleSelectors = config.selectors.styleDropdownButton || [
+    'ms-speech-block ms-voice-style-dropdown button',
+    'ms-speech-block button[aria-label*="Style" i]',
+    'ms-speech-block button[aria-haspopup="menu"]:not(.voice-chip):not(:has-text("Speaker")):not(:has-text("Expression"))',
+    'ms-speech-block mat-select',
+  ];
+
+  const btnMatch = await resolveLocator(page, styleSelectors, { visibleOnly: true });
+  if (!btnMatch) {
+    logger.debug(`Không thấy nút chọn Style trực tiếp trên speech block cho "${targetStyle}".`);
+    return false;
+  }
+
+  const currentText = ((await btnMatch.locator.innerText().catch(() => '')) || '').trim();
+  if (currentText.toLowerCase().includes(targetLower)) {
+    logger.debug(`Style hiện tại đã khớp "${targetStyle}" (${currentText}).`);
+    return true;
+  }
+
+  logger.info(`Đang chọn Style: "${targetStyle}" (hiện tại: "${currentText || 'mặc định'}")...`);
+
+  try {
+    await btnMatch.locator.click({ timeout: 5000 });
+    await page.waitForTimeout(350);
+
+    const optionSelectors = [
+      `.cdk-overlay-container button[mat-menu-item]:has-text("${targetStyle}")`,
+      `.cdk-overlay-container mat-option:has-text("${targetStyle}")`,
+      `.cdk-overlay-container [role="menuitem"]:has-text("${targetStyle}")`,
+      `.cdk-overlay-container [role="option"]:has-text("${targetStyle}")`,
+      `button[mat-menu-item]:has-text("${targetStyle}")`,
+      `mat-option:has-text("${targetStyle}")`,
+    ];
+
+    const optMatch = await resolveLocator(page, optionSelectors, { visibleOnly: true });
+    if (optMatch) {
+      await optMatch.locator.click({ timeout: 5000 });
+      await page.waitForTimeout(350);
+      logger.success(`Đã chọn Style: "${targetStyle}"`);
+      return true;
+    }
+
+    logger.warn(`Không tìm thấy Style "${targetStyle}" trong menu của model hiện tại.`);
+    await page.keyboard.press('Escape').catch(() => {});
+    return false;
+  } catch (err) {
+    logger.warn(`Lỗi khi chọn Style "${targetStyle}": ${err.message}`);
+    await page.keyboard.press('Escape').catch(() => {});
+    return false;
+  }
+}
+
+/**
+ * Fill the "Scene" field on models that expose it (e.g. gemini-3.1-flash-tts-preview).
+ * Silently skips on models that don't have a Scene input.
+ */
+async function ensureSceneFilled(page, scenePrompt, config, logger) {
+  const targetScene = String(scenePrompt || '').trim();
+  if (!targetScene) return false;
+
+  const sceneSelectors = config.selectors.sceneInput || [
+    'ms-autosize-textarea[arialabel="Scene"] textarea',
+    'textarea[aria-label="Scene"]',
+    'textarea[placeholder*="bustling street" i]',
+  ];
+
+  const match = await resolveLocator(page, sceneSelectors, { visibleOnly: true });
+  if (!match) {
+    logger.debug('Model hiện tại không có ô nhập Scene, bỏ qua bước điền Scene.');
+    return false;
+  }
+
+  try {
+    const currentVal = (await match.locator.inputValue().catch(() => '')).trim();
+    if (currentVal === targetScene) {
+      logger.debug('Ô Scene đã khớp sẵn nội dung cấu hình.');
+      return true;
+    }
+
+    await match.locator.fill(targetScene);
+    await match.locator.evaluate((el) => {
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await page.waitForTimeout(200);
+    logger.success('Đã tự động điền trường Scene cho model hiện tại.');
+    return true;
+  } catch (err) {
+    logger.warn(`Không thể điền trường Scene: ${err.message}`);
+    return false;
+  }
+}
+
+/**
+ * Acquire a dedicated AI Studio Speech tab for a specific worker.
+ * - Connects to cdpUrl.
+ * - Picks an unclaimed AI Studio tab (not in `claimedPages`), OR opens a brand-new tab if needed
+ *   so 2 workers on the same Chrome instance never collide on the same tab!
+ */
+async function acquireWorkerPage(
+  cdpUrl,
+  { initialModel, voiceName, voiceStyle, scenePrompt, claimedPages },
+  config,
+  logger
+) {
+  logger.info(`Kết nối Chrome CDP tại ${cdpUrl} ...`);
+  const browser = await chromium.connectOverCDP(cdpUrl);
+
+  const contexts = browser.contexts();
+  const context = contexts[0];
+  if (!context) {
+    await safeDisconnect(browser, logger);
+    throw new Error(`Không tìm thấy browser context tại ${cdpUrl}.`);
+  }
+
+  const allPages = [];
+  for (const ctx of contexts) {
+    for (const p of ctx.pages()) {
+      allPages.push(p);
+    }
+  }
+
+  const targetModel =
+    initialModel || (config.ttsModels && config.ttsModels[0]) || 'gemini-3.8-flash-tts';
+
+  // Find an existing AI Studio tab that hasn't been claimed by another worker
+  let workerPage = allPages.find(
+    (p) => p.url().includes(config.targetUrlPattern) && !claimedPages.has(p)
+  );
+
+  if (!workerPage) {
+    // Open a dedicated new tab for this worker!
+    const newUrl = `https://aistudio.google.com/generate-speech?model=${encodeURIComponent(targetModel)}`;
+    logger.info(`Mở tab AI Studio riêng cho tác vụ: ${newUrl}`);
+    workerPage = await context.newPage();
+    await workerPage.goto(newUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  } else {
+    logger.success(`Đã nhận tab AI Studio riêng: ${workerPage.url()}`);
+  }
+
+  claimedPages.add(workerPage);
+  await workerPage.bringToFront().catch(() => {});
+
+  // Ensure editor is mounted (auto-click "Create new dialog" if Zero-State)
+  await ensureSpeechEditorReady(workerPage, config, logger, 15000);
+
+  // Switch to requested initial model if needed
+  const activeModel = await getCurrentModel(workerPage, config);
+  if (initialModel && activeModel !== initialModel) {
+    await switchTtsModel(workerPage, initialModel, config, logger);
+  }
+
+  // Apply fixed voice, style (e.g. Nika + Podcast), and Scene prompt if supported by current model
+  if (voiceName) {
+    await ensureVoiceSelected(workerPage, voiceName, config, logger);
+  }
+  if (voiceStyle) {
+    await ensureStyleSelected(workerPage, voiceStyle, config, logger);
+  }
+  if (scenePrompt) {
+    await ensureSceneFilled(workerPage, scenePrompt, config, logger);
+  }
+
+  return {
+    browser,
+    page: workerPage,
+    release: async () => {
+      claimedPages.delete(workerPage);
+      await safeDisconnect(browser, null);
+    },
+  };
+}
+
+/**
+ * Quick non-intrusive HTTP probe to check if a Chrome CDP endpoint is online.
+ */
+function checkCdpEndpoint(cdpUrl, timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    try {
+      const u = new URL('/json/version', cdpUrl);
+      const req = http.get(u.toString(), { timeout: timeoutMs }, (res) => {
+        let body = '';
+        res.on('data', (chunk) => {
+          body += chunk;
+        });
+        res.on('end', () => {
+          if (res.statusCode === 200) {
+            try {
+              const info = JSON.parse(body);
+              resolve({ online: true, browser: info.Browser || 'Chrome', cdpUrl });
+              return;
+            } catch {
+              // Ignore parse error
+            }
+          }
+          resolve({ online: false, cdpUrl });
+        });
+      });
+      req.on('error', () => resolve({ online: false, cdpUrl }));
+      req.on('timeout', () => {
+        req.destroy();
+        resolve({ online: false, cdpUrl });
+      });
+    } catch {
+      resolve({ online: false, cdpUrl });
+    }
+  });
+}
+
+function findChromeExecutable() {
+  if (process.platform === 'win32') {
+    const candidates = [
+      path.join(process.env.ProgramFiles || 'C:\\Program Files', 'Google\\Chrome\\Application\\chrome.exe'),
+      path.join(
+        process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)',
+        'Google\\Chrome\\Application\\chrome.exe'
+      ),
+      path.join(
+        process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData\\Local'),
+        'Google\\Chrome\\Application\\chrome.exe'
+      ),
+    ];
+    return candidates.find((p) => fs.existsSync(p)) || null;
+  }
+  if (process.platform === 'darwin') {
+    const macPath = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+    return fs.existsSync(macPath) ? macPath : null;
+  }
+  return 'google-chrome';
+}
+
+/**
+ * Launch a dedicated Chrome Debug window for any profile (custom port & dirName).
+ */
+function launchChromeDebugInstance({
+  port = 9222,
+  profileSlot = 1,
+  dirName = '',
+  model = 'gemini-3.8-flash-tts',
+} = {}) {
+  const chromeExe = findChromeExecutable();
+  if (!chromeExe) {
+    throw new Error('Không tìm thấy Google Chrome trên máy tính.');
+  }
+
+  const baseAppData =
+    process.platform === 'win32'
+      ? process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local')
+      : os.homedir();
+
+  let folderName = String(dirName || '').trim();
+  if (!folderName) {
+    folderName =
+      profileSlot === 1 && Number(port) === 9222
+        ? 'aistudio-tts-chrome-profile'
+        : `aistudio-tts-chrome-profile-${port}`;
+  }
+  if (process.platform !== 'win32' && !folderName.startsWith('.')) {
+    folderName = `.${folderName}`;
+  }
+
+  const profileDir = path.join(baseAppData, folderName);
+  fs.mkdirSync(profileDir, { recursive: true });
+
+  const targetUrl = `https://aistudio.google.com/generate-speech?model=${encodeURIComponent(model)}`;
+  const args = [
+    `--remote-debugging-port=${port}`,
+    `--user-data-dir=${profileDir}`,
+    '--no-first-run',
+    '--no-default-browser-check',
+    targetUrl,
+  ];
+
+  const child = spawn(chromeExe, args, {
+    detached: true,
+    stdio: 'ignore',
+  });
+  child.unref();
+
+  return { port, profileDir, targetUrl };
+}
+
 module.exports = {
   connectToAIStudio,
   safeDisconnect,
   resolveLocator,
   inspectPage,
   ensureSpeechEditorReady,
+  ensureSingleSpeechBlock,
+  ensureVoiceSelected,
+  ensureStyleSelected,
+  ensureSceneFilled,
+  acquireWorkerPage,
+  checkCdpEndpoint,
+  launchChromeDebugInstance,
   getCurrentModel,
   switchTtsModel,
 };

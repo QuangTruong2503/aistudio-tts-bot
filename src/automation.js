@@ -495,8 +495,18 @@ function verifySavedAudio(filePath, minSizeBytes) {
 
 /**
  * Execute the full 5-step TTS generation pipeline for a single input text file.
+ * Supports an optional `runUiExclusive` lock function so 2 tabs sharing 1 Chrome window
+ * serialize brief focus-sensitive actions (Fill+Run and UI Download) while waiting for render in parallel!
  */
-async function processSingleFile(page, config, { baseName, text, outputDir }, logger, shouldStop) {
+async function processSingleFile(
+  page,
+  config,
+  { baseName, text, outputDir, runUiExclusive },
+  logger,
+  shouldStop
+) {
+  const withUiLock = typeof runUiExclusive === 'function' ? runUiExclusive : (fn) => fn();
+
   const { capture: netCapture, detach } = attachNetworkInterceptor(
     page,
     config.enableNetworkIntercept,
@@ -504,34 +514,43 @@ async function processSingleFile(page, config, { baseName, text, outputDir }, lo
   );
 
   try {
-    // 1. Pre-run snapshot
-    const snapshot = await takePreRunSnapshot(page, config);
-    logger.debug(
-      `Pre-run snapshot: audioCount=${snapshot.audioCount}, duration="${snapshot.durationText}", downloadReady=${snapshot.downloadReady}`
-    );
+    // Steps 1-3 inside brief UI lock so 2 tabs in 1 Chrome never steal focus mid-typing/clicking
+    const { snapshot, startState } = await withUiLock(async () => {
+      await page.bringToFront().catch(() => {});
+      // 1. Pre-run snapshot
+      const snap = await takePreRunSnapshot(page, config);
+      logger.debug(
+        `Pre-run snapshot: audioCount=${snap.audioCount}, duration="${snap.durationText}", downloadReady=${snap.downloadReady}`
+      );
 
-    // 2. Fill Speech Block
-    await fillSpeechBlock(page, config, text, logger);
+      // 2. Fill Speech Block
+      await fillSpeechBlock(page, config, text, logger);
 
-    // 3. Trigger Run
-    const startState = await triggerRun(page, config, snapshot, logger);
+      // 3. Trigger Run
+      const state = await triggerRun(page, config, snap, logger);
+      return { snapshot: snap, startState: state };
+    });
 
-    // 4. Wait for Completion
+    // 4. Wait for Completion (runs 100% in parallel across workers!)
     await waitForCompletion(page, config, snapshot, startState, netCapture, logger, shouldStop);
 
     // Small settle delay for audio blob / download button binding
     await page.waitForTimeout(500);
 
-    // 5. Multi-strategy Download
-    let savedPath = await tryUiDownload(page, config, baseName, outputDir, logger);
-    if (!savedPath) {
-      savedPath = await tryDomAudioFetch(page, baseName, outputDir, logger);
-    }
-    if (!savedPath) {
-      savedPath = tryNetworkCaptureSave(netCapture, baseName, outputDir, logger);
-    }
+    // 5. Multi-strategy Download (inside brief UI lock for clean download event handling)
+    const { savedPath, sizeBytes } = await withUiLock(async () => {
+      await page.bringToFront().catch(() => {});
+      let dest = await tryUiDownload(page, config, baseName, outputDir, logger);
+      if (!dest) {
+        dest = await tryDomAudioFetch(page, baseName, outputDir, logger);
+      }
+      if (!dest) {
+        dest = tryNetworkCaptureSave(netCapture, baseName, outputDir, logger);
+      }
+      const size = verifySavedAudio(dest, config.minAudioSizeBytes);
+      return { savedPath: dest, sizeBytes: size };
+    });
 
-    const sizeBytes = verifySavedAudio(savedPath, config.minAudioSizeBytes);
     return { savedPath, sizeBytes };
   } finally {
     detach();

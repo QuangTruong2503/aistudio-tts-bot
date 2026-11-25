@@ -1,110 +1,53 @@
-# Hướng dẫn sử dụng `aistudio-tts-bot`
+# AI Studio TTS Pro Studio (`aistudio-tts-bot`)
 
-Công cụ CLI tự động chuyển đổi hàng loạt file truyện `.txt` sang giọng nói bằng **Google AI Studio** (qua Chrome CDP), tự động chia đoạn mượt ở cuối đoạn văn, xoay vòng 5 model TTS khi chạm giới hạn, và tự động ghép & đăng lên CMS **PNTTAudio**.
+Hệ thống tự động hóa tạo truyện nói (TTS) thông minh nhất cho **Google AI Studio** + tự động ghép & đăng chương lên CMS **PNTTAudio**:
+- **Giao diện Web Dashboard hiện đại (`http://localhost:3456`)** điều khiển trực quan & theo dõi tiến độ/log realtime.
+- **Chạy 2 Tác vụ song song (x2 tốc độ)**: Hỗ trợ linh hoạt cả **2 Tab trên 1 Chrome** hoặc **2 Cửa sổ Chrome độc lập (cổng 9222 & 9223 cho 2 tài khoản Google)**.
+- **2 Chế độ phân việc**: Gộp sức chạy chung 1 bộ truyện (tự chia chương) HOẶC chạy 2 bộ truyện độc lập hoàn toàn.
+- **Tự động xoay vòng Model TTS & Chọn Giọng đọc cố định**: Xoay vòng sau mỗi chương và đổi ngay lập tức khi chạm giới hạn Quota; tự thoát màn hình Zero-State (`Create new dialog`) và chọn lại đúng giọng đọc cố định.
+- **Khóa đồng bộ CMS (Publish Queue) & Tự động dọn file `.wav`**: Chống đè nhau khi 2 tác vụ đăng lên CMS cùng lúc, cấu hình Bitrate AAC (`48k/64k/96k/128k`) & nhịp nghỉ nối đoạn (`0s/0.4s/0.8s`), tùy chọn tự xóa file `.wav` sau khi đăng thành công để tiết kiệm ổ cứng mà vẫn nhớ lịch sử Resume.
 
 ---
 
-## 1. Chuẩn bị trước khi chạy
+## Cách 1: Sử dụng qua Giao diện Điều khiển (Khuyên dùng)
 
-### Bước 1: Mở Chrome chế độ Debug
+Chạy lệnh sau (hoặc nhấp đúp vào `scripts\start-dashboard.bat`):
+
 ```powershell
+npm run ui
+```
+
+Trình duyệt sẽ tự động mở bảng điều khiển tại **`http://localhost:3456`**.
+
+Trên giao diện, bạn có thể:
+1. Bấm nút **Mở Chrome 1 (9222)** (và **Mở Chrome 2 (9223)** nếu muốn dùng tài khoản Google thứ 2 để nhân đôi Quota). Đăng nhập Google AI Studio + CMS 1 lần trên các cửa sổ đó.
+2. Cấu hình số tác vụ (`1` hoặc `2`), danh sách ưu tiên Model TTS, Giọng đọc cố định, Số phần chia `.txt`, Thời gian chờ/nghỉ, và Cấu hình CMS.
+3. Bấm **▶ Bắt đầu Chạy Tự động** và theo dõi trực tiếp từng tác vụ, đồng hồ đếm giây, ETA ước tính và log realtime.
+
+---
+
+## Cách 2: Sử dụng qua Dòng lệnh (CLI truyền thống)
+
+Nếu bạn vẫn muốn chạy nhanh qua terminal không cần giao diện:
+
+```powershell
+# Mở Chrome Debug cổng 9222 (hoặc truyền 9223 cho profile thứ 2)
 .\scripts\start-chrome.bat
-```
-*(Nếu cổng `9222` bị chiếm, truyền cổng khác: `.\scripts\start-chrome.bat 9223`)*
+.\scripts\start-chrome.bat 9223
 
-### Bước 2: Đăng nhập 1 lần trong cửa sổ Chrome Debug
-1. Đăng nhập tài khoản Google trên tab `https://aistudio.google.com/generate-speech?model=gemini-3.8-flash-tts` và chọn sẵn giọng đọc / style mong muốn.
-2. Mở thêm 1 tab tới trang CMS (`http://localhost:5173/admin/stories/59a33778-f5e0-4937-b3e8-b5ee46542872/chapters` hoặc `https://pnttaudio.netlify.app/...`) và đăng nhập tài khoản Quản trị viên (nếu dùng chế độ tự động đăng).
-3. Chép các file `.txt` vào thư mục `input/`.
-
----
-
-## 2. Tổng hợp các lệnh chạy `node src/index.js`
-
-### Kiểm tra kết nối & selector (KHÔNG bấm Run)
-```powershell
+# Kiểm tra selector trên tab AI Studio đang mở
 node src/index.js --inspect
-```
 
-### Chạy bình thường (tạo audio theo từng phần + tự động đăng trọn bộ mỗi chương lên CMS)
-```powershell
-# Chạy toàn bộ file trong input/ (tự bỏ qua chương/phần đã xong)
+# Chạy toàn bộ file trong input/
 node src/index.js
 
-# Chạy thử N chương đầu tiên (khuyên dùng khi mới test)
-node src/index.js --limit 1
-node src/index.js --limit 5
-```
+# Chạy thử N chương, chia 4 phần, chọn model khởi đầu
+node src/index.js --limit 2 --parts 4 --model gemini-3.8-flash-lite-tts
 
-### Tùy chỉnh chia phần (mặc định đọc từ `config.js`, hiện là 8 phần/chương)
-```powershell
-# Chia mỗi file .txt thành 4 phần (_1.wav .. _4.wav)
-node src/index.js --parts 4
-
-# Chia 5 phần/chương
-node src/index.js --parts 5
-
-# Không chia nhỏ (tạo 1 file audio duy nhất cho cả chương)
-node src/index.js --parts 1
-```
-
-### Chỉ định model TTS khởi đầu
-*(Khi gặp giới hạn/quota, bot tự động xoay vòng qua 5 model: `gemini-3.8-flash-tts` → `gemini-3.8-flash-lite-tts` → `gemini-3.1-flash-tts-preview` → `gemini-2.5-pro-preview-tts` → `gemini-2.5-flash-preview-tts`)*
-```powershell
-node src/index.js --model gemini-3.8-flash-tts
-node src/index.js --model gemini-3.8-flash-lite-tts
-node src/index.js --model gemini-3.1-flash-tts-preview
-node src/index.js --model gemini-2.5-pro-preview-tts
-node src/index.js --model gemini-2.5-flash-preview-tts
-```
-
-### Điều khiển đăng lên CMS (Auto-Publish)
-```powershell
-# Chỉ tạo & tải audio về thư mục output/, KHÔNG đăng lên CMS
+# Chỉ tải audio (không đăng CMS) / Chỉ đăng file có sẵn trong output/
 node src/index.js --no-publish
-
-# Chỉ đăng các file audio có sẵn trong output/ lên CMS (không chạy lại TTS)
 node src/index.js --publish-only
 
-# Đăng lên bản web Netlify thay vì localhost
-node src/index.js --publish-url https://pnttaudio.netlify.app/admin/stories/59a33778-f5e0-4937-b3e8-b5ee46542872/chapters
-```
-
-### Chạy lại file lỗi / chạy ép lại từ đầu
-```powershell
-# Chỉ chạy lại các chương từng bị lỗi trong logs/failed.json
+# Chạy lại các file bị lỗi trong logs/failed.json
 node src/index.js --retry-failed
-
-# Bắt buộc tạo lại & đăng lại kể cả chương đã có trong output/
-node src/index.js --force --limit 1
 ```
-
-### Tùy chỉnh thư mục & cổng CDP
-```powershell
-# Đổi thư mục input / output tùy ý
-node src/index.js --input D:\truyen\txt --output D:\truyen\audio
-
-# Kết nối tới Chrome Debug chạy ở cổng khác (ví dụ 9223)
-node src/index.js --cdp http://127.0.0.1:9223
-```
-
-### Kết hợp nhiều cờ (ví dụ thực tế)
-```powershell
-# Chạy 3 chương, chia 4 phần/chương, bắt đầu từ flash-lite, tự đăng lên Netlify
-node src/index.js --limit 3 --parts 4 --model gemini-3.8-flash-lite-tts --publish-url https://pnttaudio.netlify.app/admin/stories/59a33778-f5e0-4937-b3e8-b5ee46542872/chapters
-
-# Chạy qua đêm chỉ tải audio về máy, chia 4 phần, không đăng CMS
-node src/index.js --parts 4 --no-publish
-```
-
-### Xem trợ giúp nhanh
-```powershell
-node src/index.js --help
-```
-
----
-
-## 3. Dừng an toàn & Tiếp tục (Resume)
-- Nhấn `Ctrl + C` 1 lần để dừng sạch sẽ (không tắt cửa sổ Chrome của bạn).
-- Lần sau chỉ cần chạy lại `node src/index.js` — bot sẽ tự động bỏ qua các chương/phần đã hoàn tất và chạy tiếp đúng chỗ đang dở.
-- Xem log chi tiết tại `logs/run.log`, danh sách lỗi tại `logs/failed.json`, và danh sách đã đăng tại `logs/published.json`.

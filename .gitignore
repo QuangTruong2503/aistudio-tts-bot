@@ -3,6 +3,7 @@ node_modules/
 logs/*.log
 logs/failed.json
 logs/published.json
+logs/ui-settings.json
 output/*.wav
 output/*.mp3
 output/*.ogg

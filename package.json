@@ -8,6 +8,7 @@
     "node": ">=18.0.0"
   },
   "scripts": {
+    "ui": "node src/server.js",
     "start": "node src/index.js",
     "inspect": "node src/index.js --inspect",
     "retry-failed": "node src/index.js --retry-failed"

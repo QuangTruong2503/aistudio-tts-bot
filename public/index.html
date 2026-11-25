@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Studio TTS Pro — Điều phối Đa tác vụ Thông minh</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-logo">TTS</div>
+      <div>
+        <h1>AI Studio TTS Pro Studio</h1>
+        <p class="subtitle">Điều phối 2 Tác vụ Song song • Tự xoay vòng Model • Auto-Merge CMS</p>
+      </div>
+    </div>
+
+    <div class="topbar-actions">
+      <div id="topbarProfilesContainer" class="topbar-profiles"></div>
+      <button type="button" id="btnGotoProfiles" class="btn btn-secondary btn-sm">+ Hồ sơ Chrome</button>
+      <button type="button" class="btn btn-ghost btn-sm" data-open-folder="input">Thư mục Input</button>
+      <button type="button" class="btn btn-ghost btn-sm" data-open-folder="output">Thư mục Output</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- Control & Global Progress Card -->
+    <section class="card hero-card">
+      <div class="hero-top">
+        <div class="status-cluster">
+          <span id="engineBadge" class="badge badge-idle">SẴN SÀNG</span>
+          <span id="fileCountInfo" class="muted-text">Đang tải thông tin thư mục...</span>
+        </div>
+
+        <div class="action-buttons">
+          <button type="button" id="btnStart" class="btn btn-primary">
+            ▶ Bắt đầu Chạy Tự động
+          </button>
+          <button type="button" id="btnRetryFailed" class="btn btn-warning">
+            ↻ Chạy lại File lỗi (<span id="failedBadgeCount">0</span>)
+          </button>
+          <button type="button" id="btnPublishOnly" class="btn btn-secondary">
+            ☁ Chỉ Đăng Output lên CMS
+          </button>
+          <button type="button" id="btnStop" class="btn btn-danger" disabled>
+            ■ Dừng An toàn
+          </button>
+        </div>
+      </div>
+
+      <div class="progress-wrap">
+        <div class="progress-bar-bg">
+          <div id="globalProgressBar" class="progress-bar-fill" style="width: 0%"></div>
+        </div>
+        <div class="progress-meta">
+          <span id="globalProgressText">Tiến độ: 0 / 0 chương (0%)</span>
+          <span id="etaText">Ước tính còn lại (ETA): --</span>
+        </div>
+      </div>
+
+      <div class="stats-grid">
+        <div class="stat-box">
+          <span class="stat-label">Tổng chương quét</span>
+          <strong id="statTotal" class="stat-val">0</strong>
+        </div>
+        <div class="stat-box stat-ok">
+          <span class="stat-label">Hoàn thành</span>
+          <strong id="statCompleted" class="stat-val">0</strong>
+        </div>
+        <div class="stat-box stat-accent">
+          <span class="stat-label">Phần Audio đã tạo</span>
+          <strong id="statParts" class="stat-val">0</strong>
+        </div>
+        <div class="stat-box stat-pub">
+          <span class="stat-label">Đã đăng CMS</span>
+          <strong id="statPublished" class="stat-val">0</strong>
+        </div>
+        <div class="stat-box stat-skip">
+          <span class="stat-label">Bỏ qua (Skip)</span>
+          <strong id="statSkipped" class="stat-val">0</strong>
+        </div>
+        <div class="stat-box stat-err">
+          <span class="stat-label">Thất bại</span>
+          <strong id="statFailed" class="stat-val">0</strong>
+        </div>
+      </div>
+    </section>
+
+    <!-- Live Dual Workers Monitor -->
+    <section class="workers-grid">
+      <div class="card worker-card" id="workerCard1">
+        <div class="worker-header">
+          <div class="worker-title">
+            <span class="worker-num">W1</span>
+            <div>
+              <h3>Tác vụ 1</h3>
+              <small id="w1CdpLabel">http://127.0.0.1:9222</small>
+            </div>
+          </div>
+          <span id="w1Badge" class="phase-badge phase-idle">Sẵn sàng</span>
+        </div>
+        <div class="worker-meta">
+          <div><span class="meta-k">Model:</span> <code id="w1Model">--</code></div>
+          <div><span class="meta-k">Giọng:</span> <strong id="w1Voice">Mặc định</strong></div>
+          <div><span class="meta-k">Chương xong:</span> <strong id="w1Done">0</strong></div>
+        </div>
+        <div class="worker-file" id="w1File">Chưa có chương đang xử lý</div>
+        <div class="worker-progress-bg">
+          <div id="w1PartBar" class="worker-progress-fill" style="width: 0%"></div>
+        </div>
+        <div class="worker-footer">
+          <span id="w1Message" class="muted-text">Chờ khởi chạy...</span>
+          <span id="w1Timer" class="timer-pill">00:00</span>
+        </div>
+      </div>
+
+      <div class="card worker-card" id="workerCard2">
+        <div class="worker-header">
+          <div class="worker-title">
+            <span class="worker-num worker-num-2">W2</span>
+            <div>
+              <h3>Tác vụ 2</h3>
+              <small id="w2CdpLabel">http://127.0.0.1:9222</small>
+            </div>
+          </div>
+          <span id="w2Badge" class="phase-badge phase-idle">Sẵn sàng</span>
+        </div>
+        <div class="worker-meta">
+          <div><span class="meta-k">Model:</span> <code id="w2Model">--</code></div>
+          <div><span class="meta-k">Giọng:</span> <strong id="w2Voice">Mặc định</strong></div>
+          <div><span class="meta-k">Chương xong:</span> <strong id="w2Done">0</strong></div>
+        </div>
+        <div class="worker-file" id="w2File">Chưa có chương đang xử lý</div>
+        <div class="worker-progress-bg">
+          <div id="w2PartBar" class="worker-progress-fill" style="width: 0%"></div>
+        </div>
+        <div class="worker-footer">
+          <span id="w2Message" class="muted-text">Chờ khởi chạy...</span>
+          <span id="w2Timer" class="timer-pill">00:00</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Main 2-column Workspace: Settings & Models (Left) + Live Logs (Right) -->
+    <div class="workspace-grid">
+      <section class="card settings-panel">
+        <div class="panel-header">
+          <h2>⚙ Cấu hình Thông minh</h2>
+          <div class="save-cluster">
+            <span id="saveStatus" class="save-hint">Tự lưu khi bấm Chạy</span>
+            <button type="button" id="btnSaveSettings" class="btn btn-primary btn-sm">Lưu Cấu hình</button>
+          </div>
+        </div>
+
+        <!-- Tabs inside Settings -->
+        <div class="settings-tabs">
+          <button type="button" class="stab active" data-tab="tab-concurrency">Đa tác vụ & Truyện</button>
+          <button type="button" class="stab" data-tab="tab-profiles">Hồ sơ Chrome</button>
+          <button type="button" class="stab" data-tab="tab-models">Models & Giọng đọc</button>
+          <button type="button" class="stab" data-tab="tab-split-timing">Chia đoạn & Thời gian</button>
+          <button type="button" class="stab" data-tab="tab-cms">CMS & Dọn dẹp</button>
+        </div>
+
+        <!-- Tab 1: Concurrency & Workers -->
+        <div class="stab-content active" id="tab-concurrency">
+          <div class="form-row two-col">
+            <div class="form-group">
+              <label>Số tác vụ chạy đồng thời</label>
+              <select id="cfgWorkerCount">
+                <option value="2">⚡ 2 Tác vụ song song (Nhân đôi tốc độ)</option>
+                <option value="1">1 Tác vụ đơn</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Chế độ phân chia công việc</label>
+              <select id="cfgQueueMode">
+                <option value="shared">🤝 Gộp sức chạy chung 1 truyện (Tự chia chương)</option>
+                <option value="independent">🔀 Chạy 2 bộ truyện độc lập hoàn toàn</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-row two-col">
+            <div class="form-group">
+              <label>Giới hạn số chương chạy (0 = Chạy hết)</label>
+              <input type="number" id="cfgLimitChapters" min="0" step="1" value="0" />
+            </div>
+            <div class="form-group checkbox-inline-box">
+              <label class="checkbox-label">
+                <input type="checkbox" id="cfgForceRerun" />
+                <span>Chạy đè lại cả những chương đã xong (<code>--force</code>)</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="subcard">
+            <h4>Cấu hình Tác vụ 1 (Chính)</h4>
+            <div class="form-row two-col">
+              <div class="form-group">
+                <label>Hồ sơ Chrome sử dụng</label>
+                <select id="w1CdpUrl"></select>
+              </div>
+              <div class="form-group">
+                <label>Model khởi đầu Tác vụ 1</label>
+                <select id="w1InitialModel"></select>
+              </div>
+            </div>
+            <div class="form-row two-col">
+              <div class="form-group">
+                <label>Thư mục Input (.txt)</label>
+                <input type="text" id="w1InputDir" />
+              </div>
+              <div class="form-group">
+                <label>Thư mục Output (.wav)</label>
+                <input type="text" id="w1OutputDir" />
+              </div>
+            </div>
+            <div class="form-group">
+              <label>URL Quản trị Chương CMS (Truyện 1)</label>
+              <input type="text" id="w1PublishUrl" />
+            </div>
+          </div>
+
+          <div class="subcard" id="w2ConfigSubcard">
+            <h4>Cấu hình Tác vụ 2 <small class="muted-text">(Có thể chọn chung 1 hồ sơ mở 2 Tab, hoặc chọn hồ sơ nick Google khác)</small></h4>
+            <div class="form-row two-col">
+              <div class="form-group">
+                <label>Hồ sơ Chrome sử dụng</label>
+                <select id="w2CdpUrl"></select>
+              </div>
+              <div class="form-group">
+                <label>Model khởi đầu Tác vụ 2</label>
+                <select id="w2InitialModel"></select>
+              </div>
+            </div>
+            <div id="w2IndependentPaths">
+              <div class="form-row two-col">
+                <div class="form-group">
+                  <label>Thư mục Input riêng (Truyện 2)</label>
+                  <input type="text" id="w2InputDir" />
+                </div>
+                <div class="form-group">
+                  <label>Thư mục Output riêng (Truyện 2)</label>
+                  <input type="text" id="w2OutputDir" />
+                </div>
+              </div>
+              <div class="form-group">
+                <label>URL Quản trị Chương CMS (Truyện 2)</label>
+                <input type="text" id="w2PublishUrl" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab: Chrome Profiles Manager -->
+        <div class="stab-content" id="tab-profiles">
+          <div class="subcard">
+            <h4>Tạo Hồ sơ Chrome mới (Tài khoản Google riêng biệt)</h4>
+            <p class="hint-text">Mỗi hồ sơ lưu cookies & phiên đăng nhập Google AI Studio riêng trên một cổng Debug độc lập (9222, 9223, 9224...).</p>
+            <div class="form-row profile-create-row">
+              <div class="form-group">
+                <label>Tên hồ sơ</label>
+                <input type="text" id="newProfileName" placeholder="VD: Nick phụ 2 (Gmail C)" />
+              </div>
+              <div class="form-group">
+                <label>Cổng Debug (Port)</label>
+                <input type="number" id="newProfilePort" min="1024" max="65535" step="1" placeholder="9224" />
+              </div>
+              <div class="form-group profile-create-btn-wrap">
+                <button type="button" id="btnAddProfile" class="btn btn-primary">+ Tạo Hồ sơ</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="subcard">
+            <h4>Danh sách Hồ sơ Chrome đang quản lý</h4>
+            <div id="profilesManagerList" class="profiles-list"></div>
+          </div>
+        </div>
+
+        <!-- Tab 2: Models & Voice -->
+        <div class="stab-content" id="tab-models">
+          <div class="form-row two-col">
+            <div class="form-group">
+              <label>Giọng đọc cố định (Tự chọn lại khi đổi model / tạo dialog mới)</label>
+              <select id="cfgVoiceSelect"></select>
+            </div>
+            <div class="form-group">
+              <label>Hoặc nhập tên giọng đọc tùy chỉnh</label>
+              <input type="text" id="cfgVoiceCustom" placeholder="VD: Nika (để trống nếu chọn bên trái)" />
+            </div>
+          </div>
+
+          <div class="form-row two-col">
+            <div class="form-group">
+              <label>Phong cách đọc — Style (Tự chọn sau khi tạo dialog / đổi model)</label>
+              <select id="cfgStyleSelect"></select>
+            </div>
+            <div class="form-group">
+              <label>Hoặc nhập Style tùy chỉnh</label>
+              <input type="text" id="cfgStyleCustom" placeholder="VD: Podcast (để trống nếu chọn bên trái)" />
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>Mô tả bối cảnh — Scene (Tự điền đối với các model có ô Scene như 3.1 Flash TTS)</label>
+            <textarea id="cfgScenePrompt" rows="2" placeholder="A cinematic audiobook narration..."></textarea>
+          </div>
+
+          <div class="checkbox-group-row">
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfgRotatePerChapter" />
+              <span>Tự động xoay vòng sang model kế tiếp sau mỗi chương</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfgRotateOnQuota" />
+              <span>Tự động đổi ngay sang model khác khi chạm giới hạn / Quota</span>
+            </label>
+          </div>
+
+          <div class="subcard">
+            <div class="subcard-head">
+              <h4>Danh sách & Thứ tự ưu tiên Model TTS</h4>
+              <div class="add-model-inline">
+                <input type="text" id="newModelInput" placeholder="Thêm mã model mới..." />
+                <button type="button" id="btnAddModel" class="btn btn-secondary btn-sm">+ Thêm</button>
+              </div>
+            </div>
+            <p class="hint-text">Tích chọn các model muốn sử dụng và bấm ▲ / ▼ để sắp xếp thứ tự ưu tiên:</p>
+            <div id="modelsListContainer" class="models-list"></div>
+          </div>
+        </div>
+
+        <!-- Tab 3: Split & Timings -->
+        <div class="stab-content" id="tab-split-timing">
+          <div class="subcard">
+            <h4>Chia nhỏ File .txt (Cắt mượt cuối đoạn văn)</h4>
+            <div class="form-row two-col">
+              <div class="form-group">
+                <label>Số phần chia mỗi chương (<code>_1.wav .. _N.wav</code>)</label>
+                <input type="number" id="cfgSplitParts" min="1" max="20" step="1" />
+                <small id="splitHint" class="hint-text">Đặt 1 nếu muốn tạo 1 file nguyên chương.</small>
+              </div>
+              <div class="form-group">
+                <label>Số ký tự tối thiểu mỗi phần</label>
+                <input type="number" id="cfgMinCharsPerSplit" min="50" step="50" />
+              </div>
+            </div>
+          </div>
+
+          <div class="subcard">
+            <h4>Thời gian chờ, Nghỉ giãn cách & Chống lỗi</h4>
+            <div class="form-row two-col">
+              <div class="form-group">
+                <label>Timeout chờ render 1 phần (giây)</label>
+                <input type="number" id="cfgMaxWaitAudioSec" min="60" step="30" />
+              </div>
+              <div class="form-group">
+                <label>Số lần thử lại tối đa (Retries)</label>
+                <input type="number" id="cfgMaxRetries" min="0" max="10" step="1" />
+              </div>
+            </div>
+
+            <div class="form-row two-col">
+              <div class="form-group">
+                <label>Nghỉ tối thiểu giữa các phần (giây)</label>
+                <input type="number" id="cfgMinDelaySec" min="0" step="1" />
+              </div>
+              <div class="form-group">
+                <label>Nghỉ tối đa giữa các phần (giây)</label>
+                <input type="number" id="cfgMaxDelaySec" min="0" step="1" />
+              </div>
+            </div>
+
+            <div class="form-row two-col">
+              <div class="form-group">
+                <label>Cooldown tạm nghỉ cho Model chạm Quota (giây)</label>
+                <input type="number" id="cfgModelCooldownSec" min="30" step="30" />
+              </div>
+              <div class="form-group">
+                <label>Nghỉ khi toàn bộ Model đều chạm Quota (giây)</label>
+                <input type="number" id="cfgRateLimitCooldownSec" min="10" step="10" />
+              </div>
+            </div>
+
+            <div class="checkbox-group-row">
+              <label class="checkbox-label">
+                <input type="checkbox" id="cfgStopOnVerify" />
+                <span>Dừng ngay nếu Google yêu cầu xác minh tài khoản (Verify Account)</span>
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="cfgStopOnQuota" />
+                <span>Dừng toàn bộ nếu hết sạch lượt thử lại do Quota</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab 4: CMS & Cleanup -->
+        <div class="stab-content" id="tab-cms">
+          <div class="checkbox-group-row">
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfgPublishEnabled" />
+              <span><strong>Tự động đăng lên CMS</strong> sau khi tải đủ các phần của chương (có khóa đồng bộ chống đè)</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfgAutoMerge" />
+              <span>Bật <strong>Tự động nhận diện & ghép các phần cùng chương</strong> trên CMS (<code>_1, _2...</code> → 1 chương)</span>
+            </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="cfgCleanupAudio" />
+              <span>🧹 <strong>Tự động xóa file <code>.wav</code> lẻ trong output/</strong> sau khi đăng CMS thành công (tiết kiệm ổ cứng, vẫn nhớ lịch sử Resume)</span>
+            </label>
+          </div>
+
+          <div class="form-row two-col">
+            <div class="form-group">
+              <label>Nhịp nghỉ nối đoạn khi ghép (Merge Gap)</label>
+              <select id="cfgMergeGap">
+                <option value="0">0s (Liền sát)</option>
+                <option value="0.4">0.4s (Khuyên dùng - cuối đoạn văn)</option>
+                <option value="0.8">0.8s (Nghỉ sâu chuyển cảnh)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Chất lượng nén Bitrate AAC trên CMS</label>
+              <select id="cfgAacBitrate">
+                <option value="48k">48 kbps (Siêu tiết kiệm — ~3.5 MB / 10 phút)</option>
+                <option value="64k">64 kbps (Cân bằng — ~4.7 MB / 10 phút)</option>
+                <option value="96k">96 kbps (Chất lượng cao)</option>
+                <option value="128k">128 kbps (Rất cao)</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>Timeout chờ ghép & tải lên CMS tối đa (giây)</label>
+            <input type="number" id="cfgMaxWaitUploadSec" min="60" step="30" />
+          </div>
+        </div>
+      </section>
+
+      <!-- Live Console Logs -->
+      <section class="card logs-panel">
+        <div class="panel-header">
+          <h2>📜 Nhật ký Hoạt động Realtime</h2>
+          <div class="log-controls">
+            <select id="logFilter" class="select-sm">
+              <option value="all">Tất cả Log</option>
+              <option value="1">Chỉ Tác vụ 1</option>
+              <option value="2">Chỉ Tác vụ 2</option>
+              <option value="ERROR">Chỉ Lỗi (ERROR)</option>
+            </select>
+            <label class="checkbox-label small-cb">
+              <input type="checkbox" id="chkAutoScroll" checked />
+              <span>Tự cuộn</span>
+            </label>
+            <button type="button" id="btnClearLogs" class="btn btn-ghost btn-sm">Xóa</button>
+          </div>
+        </div>
+
+        <div id="logContainer" class="log-console"></div>
+      </section>
+    </div>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

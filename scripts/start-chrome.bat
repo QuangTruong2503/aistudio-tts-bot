@@ -5,8 +5,13 @@ REM Allow passing a custom port as first argument (default: 9222)
 set "PORT=%~1"
 if "%PORT%"=="" set "PORT=9222"
 
-REM Dedicated profile directory (DO NOT use Default User Data; newer Chrome blocks CDP on default profile)
-set "PROFILE_DIR=%LOCALAPPDATA%\aistudio-tts-chrome-profile"
+REM Dedicated profile directory per port (9222 -> Profile 1, other port -> separate Profile)
+if "%PORT%"=="9222" (
+    set "PROFILE_DIR=%LOCALAPPDATA%\aistudio-tts-chrome-profile"
+) else (
+    set "PROFILE_DIR=%LOCALAPPDATA%\aistudio-tts-chrome-profile-%PORT%"
+)
+
 set "TARGET_URL=https://aistudio.google.com/generate-speech?model=gemini-3.8-flash-tts"
 
 REM Auto-detect Google Chrome executable on Windows

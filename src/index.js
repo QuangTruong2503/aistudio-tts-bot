@@ -21,6 +21,9 @@ const {
   safeDisconnect,
   inspectPage,
   ensureSpeechEditorReady,
+  ensureVoiceSelected,
+  ensureStyleSelected,
+  ensureSceneFilled,
   getCurrentModel,
   switchTtsModel,
 } = require('./browser');
@@ -381,6 +384,17 @@ async function main() {
       await ensureSpeechEditorReady(page, config, logger, 10000);
     }
 
+    // Auto-select default voice, style (Nika + Podcast), and Scene prompt (if supported by model)
+    if (config.defaultVoice) {
+      await ensureVoiceSelected(page, config.defaultVoice, config, logger);
+    }
+    if (config.defaultStyle) {
+      await ensureStyleSelected(page, config.defaultStyle, config, logger);
+    }
+    if (config.defaultScene) {
+      await ensureSceneFilled(page, config.defaultScene, config, logger);
+    }
+
     stats.total = files.length;
     logger.info(
       `Bắt đầu batch: ${files.length} file .txt | Model: ${currentModel} (fallback: ${ttsModels.length} models)` +
@@ -571,6 +585,15 @@ async function main() {
                 );
                 try {
                   await switchTtsModel(page, nextModel, config, logger);
+                  if (config.defaultVoice) {
+                    await ensureVoiceSelected(page, config.defaultVoice, config, logger);
+                  }
+                  if (config.defaultStyle) {
+                    await ensureStyleSelected(page, config.defaultStyle, config, logger);
+                  }
+                  if (config.defaultScene) {
+                    await ensureSceneFilled(page, config.defaultScene, config, logger);
+                  }
                   currentModel = nextModel;
                   triedModelsForPart.add(nextModel);
                   modelSwitches += 1;
@@ -702,6 +725,15 @@ async function main() {
             logger.info(`Đã xong chương -> tự động xoay vòng model: "${currentModel}" -> "${nextModel}"`);
             try {
               await switchTtsModel(page, nextModel, config, logger);
+              if (config.defaultVoice) {
+                await ensureVoiceSelected(page, config.defaultVoice, config, logger);
+              }
+              if (config.defaultStyle) {
+                await ensureStyleSelected(page, config.defaultStyle, config, logger);
+              }
+              if (config.defaultScene) {
+                await ensureSceneFilled(page, config.defaultScene, config, logger);
+              }
               currentModel = nextModel;
             } catch (switchErr) {
               logger.warn(

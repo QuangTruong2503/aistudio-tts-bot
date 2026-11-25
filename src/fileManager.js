@@ -255,12 +255,30 @@ function isFilePublished(logsDir, baseName) {
   return loadPublishedEntries(logsDir).some((item) => item.baseName === baseName);
 }
 
-function recordPublishedFile(logsDir, { baseName, audioFileName, publishUrl }) {
+function isChapterCompletedInLog(logsDir, chapterBaseName, expectedParts = 1) {
+  const entries = loadPublishedEntries(logsDir);
+  // Direct chapter-level or legacy single-file entry
+  if (entries.some((item) => item.chapterBaseName === chapterBaseName || item.baseName === chapterBaseName)) {
+    return true;
+  }
+  if (expectedParts > 1) {
+    for (let k = 1; k <= expectedParts; k++) {
+      if (!entries.some((item) => item.baseName === `${chapterBaseName}_${k}`)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return false;
+}
+
+function recordPublishedFile(logsDir, { baseName, chapterBaseName, audioFileName, publishUrl }) {
   const entries = loadPublishedEntries(logsDir);
   const now = new Date().toISOString();
   const idx = entries.findIndex((item) => item.baseName === baseName);
   const record = {
     baseName,
+    ...(chapterBaseName ? { chapterBaseName } : {}),
     audioFileName,
     publishUrl,
     publishedAt: now,
@@ -272,6 +290,26 @@ function recordPublishedFile(logsDir, { baseName, audioFileName, publishUrl }) {
   }
   fs.mkdirSync(logsDir, { recursive: true });
   fs.writeFileSync(getPublishedJsonPath(logsDir), JSON.stringify(entries, null, 2), 'utf8');
+}
+
+function cleanupAudioFiles(filePaths, logger) {
+  let removed = 0;
+  for (const fp of filePaths) {
+    try {
+      if (fp && fs.existsSync(fp)) {
+        fs.unlinkSync(fp);
+        removed += 1;
+      }
+    } catch (err) {
+      if (logger) {
+        logger.warn(`Không thể xóa file tạm "${path.basename(fp)}": ${err.message}`);
+      }
+    }
+  }
+  if (removed > 0 && logger) {
+    logger.info(`Đã dọn dẹp ${removed} file audio trong output/ sau khi đăng CMS thành công.`);
+  }
+  return removed;
 }
 
 module.exports = {
@@ -286,5 +324,7 @@ module.exports = {
   clearFailedFile,
   loadPublishedEntries,
   isFilePublished,
+  isChapterCompletedInLog,
   recordPublishedFile,
+  cleanupAudioFiles,
 };

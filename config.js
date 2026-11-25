@@ -27,9 +27,14 @@ module.exports = {
     'gemini-3.8-flash-tts',
     'gemini-3.8-flash-lite-tts',
     'gemini-3.1-flash-tts-preview',
-    // 'gemini-2.5-pro-preview-tts',
-    // 'gemini-2.5-flash-preview-tts',
+    'gemini-2.5-pro-preview-tts',
+    'gemini-2.5-flash-preview-tts',
   ],
+  defaultVoice: process.env.TTS_VOICE || 'Nika',
+  defaultStyle: process.env.TTS_STYLE || 'Podcast',
+  defaultScene:
+    process.env.TTS_SCENE ||
+    'A cinematic audiobook narration. The narrator has a clear, resonant, and expressive storytelling voice, smoothly shifting from calm description to dynamic, intense energy during action scenes.',
   rotateModelOnQuotaError: envBool('ROTATE_MODEL_ON_QUOTA_ERROR', true),
   rotateModelPerChapter: envBool('ROTATE_MODEL_PER_CHAPTER', true), // Tự động đổi sang model kế tiếp sau mỗi chương
   modelCooldownMs: envInt('MODEL_COOLDOWN_MS', 300000), // 5 phút tạm nghỉ cho model vừa bị giới hạn
@@ -166,10 +171,11 @@ module.exports = {
       'ms-speech-zero-state',
     ],
     createNewDialogCard: [
-      '[actioncardtestid="create-new-dialog-card"]',
+      'mat-card[data-testid="create-new-dialog-card"]',
       '[data-testid="create-new-dialog-card"]',
+      'mat-card.create-dialog-card',
+      'ms-speech-zero-state [role="button"]:has-text("Create new dialog")',
       'ms-speech-zero-state button:has-text("Create new dialog")',
-      'ms-speech-zero-state :has-text("Create new dialog")',
     ],
 
     // Model selector (đổi model trực tiếp trong sidebar để hạn chế văng về Zero-State)
@@ -184,6 +190,33 @@ module.exports = {
     modelSelectorCard: [
       'ms-model-selector button.model-selector-card',
       'button.model-selector-card',
+    ],
+
+    // Chọn giọng đọc & phong cách cố định (Voice & Style selection)
+    voiceChipButton: [
+      'ms-speech-block button.voice-chip',
+      'ms-speech-block button:has-text("Speaker 1")',
+      'button.voice-playground-chip',
+      'ms-voice-settings button.active-voice-card-trigger',
+      'button[aria-label="Open voice settings"]',
+    ],
+    voiceSearchInput: [
+      'ms-speaker-settings-panel input[placeholder="Search voices"]',
+      'input[aria-label="Search voices"]',
+      'input[placeholder*="Search voices" i]',
+    ],
+    styleDropdownButton: [
+      'ms-speech-block ms-voice-style-dropdown button',
+      'ms-speech-block button[aria-label*="Style" i]',
+      'ms-speech-block button[aria-haspopup="menu"]:not(.voice-chip):not(:has-text("Speaker")):not(:has-text("Expression"))',
+      'ms-speech-block button[aria-haspopup="listbox"]:not(.voice-chip):not(:has-text("Speaker")):not(:has-text("Expression"))',
+      'ms-speech-block mat-select',
+      'ms-voice-style-dropdown button[aria-label="Style"]',
+    ],
+    sceneInput: [
+      'ms-autosize-textarea[arialabel="Scene"] textarea',
+      'textarea[aria-label="Scene"]',
+      'textarea[placeholder*="bustling street" i]',
     ],
 
     promptInput: [

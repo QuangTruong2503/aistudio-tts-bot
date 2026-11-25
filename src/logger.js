@@ -21,16 +21,28 @@ function formatTimestamp(date = new Date()) {
 }
 
 class Logger {
-  constructor(logsDir) {
+  constructor(logsDir, options = {}) {
     this.logsDir = logsDir;
     this.logFile = path.join(logsDir, 'run.log');
+    this.prefix = options.prefix || '';
+    this.workerId = options.workerId || null;
+    this.onLog = typeof options.onLog === 'function' ? options.onLog : null;
     fs.mkdirSync(this.logsDir, { recursive: true });
+  }
+
+  child(options = {}) {
+    return new Logger(this.logsDir, {
+      prefix: options.prefix ?? this.prefix,
+      workerId: options.workerId ?? this.workerId,
+      onLog: options.onLog ?? this.onLog,
+    });
   }
 
   _write(level, color, message) {
     const ts = formatTimestamp();
-    const plainLine = `[${ts}] [${level}] ${message}`;
-    const coloredLine = `${COLORS.dim}[${ts}]${COLORS.reset} ${color}[${level}]${COLORS.reset} ${message}`;
+    const taggedMessage = this.prefix ? `${this.prefix} ${message}` : message;
+    const plainLine = `[${ts}] [${level}] ${taggedMessage}`;
+    const coloredLine = `${COLORS.dim}[${ts}]${COLORS.reset} ${color}[${level}]${COLORS.reset} ${taggedMessage}`;
 
     if (level === 'ERROR') {
       console.error(coloredLine);
@@ -42,6 +54,19 @@ class Logger {
       fs.appendFileSync(this.logFile, plainLine + '\n', 'utf8');
     } catch {
       // Avoid crashing the bot if log file is temporarily locked
+    }
+
+    if (this.onLog) {
+      try {
+        this.onLog({
+          timestamp: ts,
+          level,
+          workerId: this.workerId,
+          message: taggedMessage,
+        });
+      } catch {
+        // Ignore UI listener errors
+      }
     }
   }
 
