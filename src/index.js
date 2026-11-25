@@ -14,7 +14,9 @@ const {
   recordFailedFile,
   clearFailedFile,
   isFilePublished,
+  isChapterCompletedInLog,
   recordPublishedFile,
+  groupOutputAudioByChapter,
 } = require('./fileManager');
 const {
   connectToAIStudio,
@@ -307,48 +309,84 @@ async function main() {
       return;
     }
 
-    // Mode: --publish-only (upload existing output/*.wav files to CMS)
+    // Mode: --publish-only (group output/*.wav files by chapter and upload each chapter bundle for Auto-Merge)
     if (opts.publishOnly) {
-      const audioFiles = getOutputAudioFiles(config.outputDir, config.supportedAudioExtensions);
-      if (audioFiles.length === 0) {
+      const chapterGroups = groupOutputAudioByChapter(
+        config.outputDir,
+        config.supportedAudioExtensions
+      );
+      if (chapterGroups.length === 0) {
         logger.warn(`Không tìm thấy file audio nào trong: ${config.outputDir}`);
         return;
       }
 
-      stats.total = audioFiles.length;
-      logger.info(`Tìm thấy ${audioFiles.length} file audio trong ${config.outputDir}`);
+      stats.total = chapterGroups.length;
+      const totalFilesCount = chapterGroups.reduce((s, g) => s + g.files.length, 0);
+      logger.info(
+        `Tìm thấy ${totalFilesCount} file audio -> gom thành ${chapterGroups.length} chương trong ${config.outputDir}`
+      );
 
       let processed = 0;
-      for (let i = 0; i < audioFiles.length; i++) {
+      for (let i = 0; i < chapterGroups.length; i++) {
         if (shouldStop()) break;
         if (opts.limit !== null && processed >= opts.limit) {
-          logger.info(`Đã đạt giới hạn --limit ${opts.limit}. Dừng.`);
+          logger.info(`Đã đạt giới hạn --limit ${opts.limit} chương. Dừng.`);
           break;
         }
 
-        const audio = audioFiles[i];
-        const prefix = `[${i + 1}/${audioFiles.length}] ${audio.fileName}`;
+        const group = chapterGroups[i];
+        const prefix = `[${i + 1}/${chapterGroups.length}] ${group.chapterBaseName}`;
 
-        if (!opts.force && isFilePublished(config.logsDir, audio.baseName)) {
-          logger.skip(`${prefix} -> đã đăng lên CMS trước đó.`);
+        if (
+          !opts.force &&
+          isChapterCompletedInLog(config.logsDir, group.chapterBaseName, group.files.length)
+        ) {
+          logger.skip(`${prefix} (${group.files.length} file) -> đã đăng lên CMS trước đó.`);
           stats.skipped += 1;
           continue;
         }
 
+        if (group.hasSequenceGap) {
+          logger.warn(
+            `${prefix} -> CẢNH BÁO: thiếu phần ở giữa chuỗi (${group.files.map((f) => f.partNumber).join(', ')}).`
+          );
+        }
+
         processed += 1;
         try {
-          await publishAudioToCms(browser, null, config, audio.fullPath, logger, shouldStop);
+          await publishAudioToCms(
+            browser,
+            null,
+            config,
+            group.files.map((f) => f.fullPath),
+            logger,
+            shouldStop,
+            { expectedChaptersAdded: config.publish.autoMerge ? 1 : group.files.length }
+          );
+          for (const f of group.files) {
+            recordPublishedFile(config.logsDir, {
+              baseName: f.baseName,
+              chapterBaseName: group.chapterBaseName,
+              audioFileName: f.fileName,
+              publishUrl: config.publish.chaptersUrl,
+            });
+          }
           recordPublishedFile(config.logsDir, {
-            baseName: audio.baseName,
-            audioFileName: audio.fileName,
+            baseName: group.chapterBaseName,
+            chapterBaseName: group.chapterBaseName,
+            audioFileName: `${group.chapterBaseName} (${group.files.length} parts)`,
             publishUrl: config.publish.chaptersUrl,
           });
           stats.published += 1;
           stats.succeeded += 1;
         } catch (err) {
           logger.error(`${prefix} -> đăng lên CMS thất bại: ${err.message}`);
-          recordFailedFile(config.logsDir, `${audio.baseName}.txt`, `Publish error: ${err.message}`);
+          recordFailedFile(config.logsDir, `${group.chapterBaseName}.txt`, `Publish error: ${err.message}`);
           stats.failed += 1;
+        }
+
+        if (i < chapterGroups.length - 1 && !shouldStop()) {
+          await interruptibleSleep(2000, shouldStop);
         }
       }
       return;

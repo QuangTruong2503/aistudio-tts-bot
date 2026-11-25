@@ -18,6 +18,7 @@ const {
   isChapterCompletedInLog,
   recordPublishedFile,
   cleanupAudioFiles,
+  groupOutputAudioByChapter,
 } = require('./fileManager');
 const {
   acquireWorkerPage,
@@ -545,84 +546,182 @@ class AutomationEngine extends EventEmitter {
     const runtimeConfig = this._buildRuntimeConfig(settings, wCfg);
     runtimeConfig.publish.enabled = true;
 
-    const wLogger = this.rootLogger.child({ prefix: '[W1-Publish]', workerId: 1 });
+    const wLogger = this.rootLogger.child({ prefix: '[Chỉ Đăng CMS]', workerId: 1 });
     ensureDirectories([runtimeConfig.outputDir, runtimeConfig.logsDir]);
 
-    const exts = new Set(runtimeConfig.supportedAudioExtensions.map((e) => e.toLowerCase()));
-    const audioFiles = fs
-      .readdirSync(runtimeConfig.outputDir, { withFileTypes: true })
-      .filter((e) => e.isFile() && exts.has(path.extname(e.name).toLowerCase()))
-      .map((e) => e.name)
-      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
-      .map((fileName) => {
-        const ext = path.extname(fileName);
-        const fullPath = path.join(runtimeConfig.outputDir, fileName);
-        return {
-          fileName,
-          baseName: fileName.slice(0, -ext.length),
-          fullPath,
-          size: fs.statSync(fullPath).size,
-        };
-      })
-      .filter((f) => f.size > 0);
+    // Group output/*.wav files by chapter (e.g. Chương 1435_1.._8 -> 1 chapter bundle for Auto-Merge)
+    const chapterGroups = groupOutputAudioByChapter(
+      runtimeConfig.outputDir,
+      runtimeConfig.supportedAudioExtensions
+    );
 
-    this.stats.totalChapters = audioFiles.length;
-    if (audioFiles.length === 0) {
-      wLogger.warn(`Không có file audio nào trong ${runtimeConfig.outputDir}`);
+    this.stats.totalChapters = chapterGroups.length;
+    if (chapterGroups.length === 0) {
+      wLogger.warn(`Không tìm thấy file audio nào trong ${runtimeConfig.outputDir}`);
       return;
+    }
+
+    const totalFilesCount = chapterGroups.reduce((sum, g) => sum + g.files.length, 0);
+    wLogger.info(
+      `Quét thấy ${totalFilesCount} file audio -> gom thành ${chapterGroups.length} chương` +
+        (runtimeConfig.publish.autoMerge ? ' (Auto-Merge: BẬT)' : ' (Auto-Merge: TẮT)')
+    );
+
+    // Find an online Chrome CDP endpoint (try Worker 1's profile first, then any online profile)
+    let activeCdpUrl = runtimeConfig.cdpUrl;
+    const primaryProbe = await checkCdpEndpoint(activeCdpUrl, 1500);
+    if (!primaryProbe.online) {
+      for (const p of settings.chromeProfiles || []) {
+        const candUrl = `http://127.0.0.1:${p.port}`;
+        const probe = await checkCdpEndpoint(candUrl, 1500);
+        if (probe.online) {
+          wLogger.info(`Hồ sơ mặc định đang tắt -> tự động dùng hồ sơ "${p.name}" (${candUrl}) đang Online.`);
+          activeCdpUrl = candUrl;
+          break;
+        }
+      }
     }
 
     const { chromium } = require('playwright-core');
     this._updateWorker(1, {
       active: true,
       phase: 'connecting',
-      cdpUrl: runtimeConfig.cdpUrl,
-      lastMessage: 'Đang kết nối Chrome CDP...',
+      cdpUrl: activeCdpUrl,
+      currentModel: 'CMS Bulk Upload',
+      lastMessage: `Đang kết nối Chrome CDP (${activeCdpUrl})...`,
     });
+
+    const limitTotal = Number(settings.limitChapters || 0) > 0 ? Number(settings.limitChapters) : null;
+    let processedCount = 0;
 
     let browser;
     try {
-      browser = await chromium.connectOverCDP(runtimeConfig.cdpUrl);
-      for (const audio of audioFiles) {
+      browser = await chromium.connectOverCDP(activeCdpUrl);
+
+      for (let i = 0; i < chapterGroups.length; i++) {
         if (this.stopRequested) break;
-        if (!settings.forceRerun && isFilePublished(runtimeConfig.logsDir, audio.baseName)) {
+        if (limitTotal !== null && processedCount >= limitTotal) {
+          wLogger.info(`Đã đạt giới hạn ${limitTotal} chương. Dừng.`);
+          break;
+        }
+
+        const group = chapterGroups[i];
+        const prefix = `[${i + 1}/${chapterGroups.length}] ${group.chapterBaseName}`;
+
+        // Skip already-published chapters unless --force
+        if (
+          !settings.forceRerun &&
+          isChapterCompletedInLog(runtimeConfig.logsDir, group.chapterBaseName, group.files.length)
+        ) {
           this.stats.skippedChapters += 1;
-          wLogger.skip(`${audio.fileName} -> đã đăng trước đó.`);
+          wLogger.skip(`${prefix} (${group.files.length} file) -> đã đăng CMS trước đó.`);
+          this._recomputeEta(1);
           this._emitState();
           continue;
         }
 
-        this._updateWorker(1, {
-          phase: 'publishing',
-          currentFile: audio.fileName,
-          lastMessage: `Đang đăng ${audio.fileName}...`,
-        });
-
-        await publishAudioToCms(
-          browser,
-          null,
-          runtimeConfig,
-          audio.fullPath,
-          wLogger,
-          () => this.stopRequested
-        );
-
-        recordPublishedFile(runtimeConfig.logsDir, {
-          baseName: audio.baseName,
-          audioFileName: audio.fileName,
-          publishUrl: runtimeConfig.publish.chaptersUrl,
-        });
-
-        if (runtimeConfig.cleanupAudioAfterPublish) {
-          cleanupAudioFiles([audio.fullPath], wLogger);
+        if (group.hasSequenceGap) {
+          wLogger.warn(
+            `${prefix} -> CẢNH BÁO: thiếu phần ở giữa chuỗi (${group.files.map((f) => f.partNumber).join(', ')}). Vẫn tiến hành đăng các phần hiện có...`
+          );
         }
 
-        this.stats.publishedChapters += 1;
-        this.stats.completedChapters += 1;
+        processedCount += 1;
+        const chapterStartedAt = Date.now();
+        const filePaths = group.files.map((f) => f.fullPath);
+
+        this._updateWorker(1, {
+          phase: 'publishing',
+          currentFile: `${group.chapterBaseName} (${group.files.length} file • ${formatSize(group.totalSize)})`,
+          currentPart: group.files.length,
+          totalParts: group.files.length,
+          partStartedAt: new Date().toISOString(),
+          lastMessage: `Đang ghép & đăng ${group.files.length} phần lên CMS...`,
+        });
+
+        let publishedOk = false;
+        let lastErr = null;
+        const maxAttempts = 2;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          if (this.stopRequested) break;
+          try {
+            await publishAudioToCms(
+              browser,
+              null,
+              runtimeConfig,
+              filePaths,
+              wLogger,
+              () => this.stopRequested,
+              {
+                expectedChaptersAdded: runtimeConfig.publish.autoMerge ? 1 : group.files.length,
+              }
+            );
+            publishedOk = true;
+            break;
+          } catch (err) {
+            lastErr = err;
+            wLogger.error(`${prefix} -> lỗi đăng CMS (lần ${attempt}/${maxAttempts}): ${err.message}`);
+            if (attempt < maxAttempts && !this.stopRequested) {
+              wLogger.warn('Chờ 5s trước khi thử đăng lại chương này...');
+              await this._interruptibleSleep(5000);
+            }
+          }
+        }
+
+        if (publishedOk && !this.stopRequested) {
+          for (const f of group.files) {
+            recordPublishedFile(runtimeConfig.logsDir, {
+              baseName: f.baseName,
+              chapterBaseName: group.chapterBaseName,
+              audioFileName: f.fileName,
+              publishUrl: runtimeConfig.publish.chaptersUrl,
+            });
+          }
+          recordPublishedFile(runtimeConfig.logsDir, {
+            baseName: group.chapterBaseName,
+            chapterBaseName: group.chapterBaseName,
+            audioFileName: `${group.chapterBaseName} (${group.files.length} parts)`,
+            publishUrl: runtimeConfig.publish.chaptersUrl,
+          });
+          clearFailedFile(runtimeConfig.logsDir, `${group.chapterBaseName}.txt`);
+
+          if (runtimeConfig.cleanupAudioAfterPublish) {
+            cleanupAudioFiles(filePaths, wLogger);
+          }
+
+          this.stats.publishedChapters += 1;
+          this.stats.completedChapters += 1;
+          this.chapterDurationsMs.push(Date.now() - chapterStartedAt);
+          if (this.chapterDurationsMs.length > 20) this.chapterDurationsMs.shift();
+          this._recomputeEta(1);
+
+          this._updateWorker(1, {
+            chaptersDone: this.workersState[0].chaptersDone + 1,
+            lastMessage: `Đăng xong ${group.chapterBaseName}`,
+          });
+        } else if (!publishedOk && !this.stopRequested) {
+          recordFailedFile(
+            runtimeConfig.logsDir,
+            `${group.chapterBaseName}.txt`,
+            `Publish-only error: ${lastErr ? lastErr.message : 'Unknown error'}`
+          );
+          this.stats.failedChapters += 1;
+          this._updateWorker(1, {
+            chaptersFailed: this.workersState[0].chaptersFailed + 1,
+            lastMessage: `Lỗi đăng ${group.chapterBaseName}`,
+          });
+        }
+
         this._emitState();
+
+        // Short 2s pause between chapters so CMS finishes state reset cleanly
+        if (i < chapterGroups.length - 1 && !this.stopRequested) {
+          await this._interruptibleSleep(2000);
+        }
       }
     } catch (err) {
-      wLogger.error(`Lỗi chế độ Publish-Only: ${err.message}`);
+      wLogger.error(`Lỗi kết nối Chrome CDP (${activeCdpUrl}): ${err.message}`);
       this.stats.failedChapters += 1;
     } finally {
       if (browser) {
@@ -630,8 +729,9 @@ class AutomationEngine extends EventEmitter {
       }
       this._updateWorker(1, {
         active: false,
-        phase: 'done',
-        lastMessage: 'Hoàn tất Publish-Only',
+        phase: this.stopRequested ? 'stopped' : 'done',
+        partStartedAt: null,
+        lastMessage: this.stopRequested ? 'Đã dừng an toàn' : 'Hoàn tất Chỉ Đăng CMS',
       });
     }
   }

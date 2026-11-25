@@ -312,6 +312,96 @@ function cleanupAudioFiles(filePaths, logger) {
   return removed;
 }
 
+/**
+ * Scan outputDir for audio files and group multi-part files (e.g. "Chương 1435 - ABC_1.wav" .. "_8.wav")
+ * into chapter-level bundles sorted naturally so CMS Auto-Merge stitches each chapter cleanly in 1 upload.
+ */
+function groupOutputAudioByChapter(outputDir, supportedExtensions = ['.wav', '.mp3', '.ogg', '.m4a']) {
+  if (!fs.existsSync(outputDir)) return [];
+  const exts = new Set(supportedExtensions.map((e) => e.toLowerCase()));
+
+  const rawFiles = fs
+    .readdirSync(outputDir, { withFileTypes: true })
+    .filter((e) => e.isFile() && exts.has(path.extname(e.name).toLowerCase()))
+    .map((e) => e.name)
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }))
+    .map((fileName) => {
+      const ext = path.extname(fileName);
+      const fullPath = path.join(outputDir, fileName);
+      const stat = fs.statSync(fullPath);
+      const baseName = fileName.slice(0, -ext.length);
+      return {
+        fileName,
+        baseName,
+        fullPath,
+        size: stat.size,
+      };
+    })
+    .filter((f) => f.size > 0);
+
+  const groupsMap = new Map();
+
+  for (const file of rawFiles) {
+    // Detect part suffix: "_1", "_02", " (1)", " - Part 1", " Part 1"
+    const partMatch = file.baseName.match(/^(.*?)(?:_(\d+)|\s*\((\d+)\)|\s*[-–]?\s*part\s*(\d+))$/i);
+    let chapterBaseName = file.baseName;
+    let partNumber = null;
+
+    if (partMatch && partMatch[1].trim().length > 0) {
+      chapterBaseName = partMatch[1].trim();
+      partNumber = Number.parseInt(partMatch[2] || partMatch[3] || partMatch[4], 10);
+    }
+
+    let group = groupsMap.get(chapterBaseName);
+    if (!group) {
+      group = {
+        chapterBaseName,
+        files: [],
+        totalSize: 0,
+      };
+      groupsMap.set(chapterBaseName, group);
+    }
+
+    group.files.push({ ...file, partNumber });
+    group.totalSize += file.size;
+  }
+
+  // Sort chapters naturally and sort parts inside each chapter numerically
+  const groups = Array.from(groupsMap.values()).sort((a, b) =>
+    a.chapterBaseName.localeCompare(b.chapterBaseName, undefined, {
+      numeric: true,
+      sensitivity: 'base',
+    })
+  );
+
+  for (const g of groups) {
+    g.files.sort((a, b) => {
+      if (a.partNumber !== null && b.partNumber !== null) return a.partNumber - b.partNumber;
+      return a.fileName.localeCompare(b.fileName, undefined, {
+        numeric: true,
+        sensitivity: 'base',
+      });
+    });
+
+    // Check for sequence gaps (e.g. has _1 and _3 but missing _2)
+    const numbered = g.files.filter((f) => f.partNumber !== null).map((f) => f.partNumber);
+    let hasGap = false;
+    if (numbered.length > 0) {
+      const maxPart = Math.max(...numbered);
+      for (let k = 1; k <= maxPart; k++) {
+        if (!numbered.includes(k)) {
+          hasGap = true;
+          break;
+        }
+      }
+    }
+    g.hasSequenceGap = hasGap;
+    g.isMultiPart = g.files.length > 1 || numbered.length > 0;
+  }
+
+  return groups;
+}
+
 module.exports = {
   ensureDirectories,
   getInputFiles,
@@ -327,4 +417,5 @@ module.exports = {
   isChapterCompletedInLog,
   recordPublishedFile,
   cleanupAudioFiles,
+  groupOutputAudioByChapter,
 };
