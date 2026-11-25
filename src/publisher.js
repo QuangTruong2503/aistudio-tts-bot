@@ -193,7 +193,7 @@ async function configureUploadOptions(cmsPage, config, logger) {
 }
 
 /**
- * Upload & publish one or more downloaded audio files to the CMS chapters page via "Nhập chương / Upload".
+ * Upload & publish one or more downloaded audio files to the CMS chapters page via "Nhập Audio / Upload".
  */
 async function publishAudioToCms(
   browser,
@@ -226,13 +226,13 @@ async function publishAudioToCms(
     const initialCount = await readChapterCount(cmsPage, config);
     logger.debug(`Số chương hiện tại trên CMS: ${initialCount ?? 'không xác định'}`);
 
-    // Switch to "Nhập chương / Upload" tab (or legacy "Tải lên hàng loạt")
+    // Switch to "Nhập Audio / Upload" tab (or legacy "Tải lên hàng loạt")
     const bulkTab = await resolveLocator(cmsPage, config.publish.selectors.bulkUploadTab, {
       visibleOnly: true,
     });
     if (!bulkTab) {
       throw new Error(
-        'Không tìm thấy tab "Nhập chương / Upload" trên trang CMS. Hãy kiểm tra lại URL hoặc selector trong config.js.'
+        'Không tìm thấy tab "Nhập Audio / Upload" trên trang CMS. Hãy kiểm tra lại URL hoặc selector trong config.js.'
       );
     }
 
@@ -265,10 +265,10 @@ async function publishAudioToCms(
       visibleOnly: false,
     });
     if (!fileInputMatch) {
-      throw new Error('Không tìm thấy <input type="file"> trong tab Nhập chương / Upload.');
+      throw new Error('Không tìm thấy <input type="file"> trong tab Nhập Audio / Upload.');
     }
 
-    logger.info(`Đang chọn ${label} vào tab Nhập chương / Upload...`);
+    logger.info(`Đang chọn ${label} vào tab Nhập Audio / Upload...`);
     await setFileInputFast(cmsPage, fileInputMatch.locator, filesList, logger);
 
     // Wait up to 8s for the upload/submit button (e.g. "Bắt đầu (1)") to appear and become enabled
@@ -293,7 +293,9 @@ async function publishAudioToCms(
       logger.info('Không thấy nút submit riêng (có thể CMS tự động tải lên sau khi chọn file), đang chờ hoàn tất...');
     }
 
-    // Wait for client-side multi-part merge + WAV -> AAC M4A compression + R2 upload + chapter DB save
+    // Wait for client-side multi-part merge + WAV -> AAC M4A compression + R2 upload + chapter DB save.
+    // Note: Because text chapters may already be pre-imported (e.g. 2466/2466), uploading audio can UPDATE
+    // an existing chapter without increasing total chapter count — check BOTH chapter count AND tabpanel status!
     const startedAt = Date.now();
     const totalWaitMs = config.publish.maxWaitUploadMs * Math.max(1, expectedAdded);
     const deadline = startedAt + totalWaitMs;
@@ -304,23 +306,26 @@ async function publishAudioToCms(
         throw new Error('Người dùng đã hủy tiến trình khi đang đăng lên CMS.');
       }
 
+      const elapsedMs = Date.now() - startedAt;
+
+      // Signal 1: Total chapter count increased (new chapter created)
       const currentCount = await readChapterCount(cmsPage, config);
       if (expectedMinCount !== null && currentCount !== null && currentCount >= expectedMinCount) {
-        const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);
+        const elapsedSec = (elapsedMs / 1000).toFixed(1);
         logger.success(
           `Đăng thành công ${label} lên CMS sau ${elapsedSec}s (số chương: ${initialCount} -> ${currentCount}).`
         );
         return { initialCount, currentCount };
       }
 
-      const mainText = await cmsPage
+      const panelText = await cmsPage
         .evaluate(() => {
-          const m = document.querySelector('main');
-          return m ? m.innerText : document.body.innerText;
+          const panel = document.querySelector('main [role="tabpanel"]') || document.querySelector('main');
+          return panel ? panel.innerText : document.body.innerText;
         })
         .catch(() => '');
 
-      const lower = mainText.toLowerCase();
+      const lower = panelText.toLowerCase();
 
       // Check for upload errors
       if (
@@ -337,6 +342,7 @@ async function publishAudioToCms(
         lower.includes('đang ghép') ||
         lower.includes('đang nén') ||
         lower.includes('đang tải lên') ||
+        lower.includes('đang tải') ||
         lower.includes('đang xử lý') ||
         lower.includes('chờ xử lý') ||
         lower.includes('merging') ||
@@ -348,22 +354,31 @@ async function publishAudioToCms(
         lower.includes('đã tải lên') ||
         lower.includes('hoàn tất') ||
         lower.includes('thành công') ||
+        lower.includes('đã lưu') ||
+        lower.includes('đã cập nhật') ||
         lower.includes('uploaded');
 
-      // Only trust text marker alone if we couldn't read initialCount (otherwise wait for chapter count)
-      if (expectedMinCount === null && !isStillBusy && hasSuccessMarker) {
-        const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);
-        logger.success(`Đăng thành công ${label} lên CMS sau ${elapsedSec}s.`);
+      // Check if an enabled "Bắt đầu (" button is still waiting to process items
+      const pendingStartBtn = await resolveLocator(
+        cmsPage,
+        ['main button:has-text("Bắt đầu (")'],
+        { visibleOnly: true }
+      );
+      const hasPendingStart = pendingStartBtn ? await isButtonReady(pendingStartBtn.locator) : false;
+
+      // Signal 2: Completion status inside tabpanel (works even when updating an existing text chapter!)
+      if (elapsedMs >= 3000 && !isStillBusy && !hasPendingStart && hasSuccessMarker) {
+        const elapsedSec = (elapsedMs / 1000).toFixed(1);
+        logger.success(
+          `Đăng thành công ${label} lên CMS sau ${elapsedSec}s` +
+            (currentCount !== null ? ` (tổng chương: ${currentCount}).` : '.')
+        );
         return { initialCount, currentCount };
       }
 
       if (Date.now() - lastLogAt >= 10000) {
-        const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
-        const countInfo =
-          initialCount !== null && currentCount !== null
-            ? ` | số chương: ${currentCount}/${expectedMinCount}`
-            : '';
-        logger.info(`Đang ghép, nén & tải ${label} lên CMS... (${elapsedSec}s${countInfo})`);
+        const elapsedSec = Math.round(elapsedMs / 1000);
+        logger.info(`Đang ghép, nén & tải ${label} lên CMS... (${elapsedSec}s)`);
         lastLogAt = Date.now();
       }
 

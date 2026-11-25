@@ -6,6 +6,7 @@ const PHASE_LABELS = {
   publishing: 'Đang ghép & đăng CMS',
   cooldown: 'Đang nghỉ Cooldown',
   switching_model: 'Đang đổi Model',
+  switching_profile: 'Đang đổi Hồ sơ Chrome',
   stopped: 'Đã dừng',
   done: 'Hoàn tất',
   error: 'Gặp lỗi',
@@ -152,22 +153,29 @@ function renderChromeProfilesUI() {
 
   // 2. Profiles Manager tab list
   const listEl = $('profilesManagerList');
+  const profCooldowns = latestState?.profileCooldowns || {};
   if (listEl) {
     listEl.innerHTML = '';
     for (const p of chromeProfiles) {
       const url = `http://127.0.0.1:${p.port}`;
       const online = Boolean(cdpStatus[url]?.online);
+      const coolSec = profCooldowns[url] || 0;
+      const coolBadge =
+        coolSec > 0
+          ? `<span class="m-health m-cooldown">Nghỉ giới hạn ${formatDurationSec(coolSec)}</span>`
+          : '';
       const card = document.createElement('div');
       card.className = 'profile-card';
       card.innerHTML = `
         <div class="profile-info">
           <span class="dot ${online ? 'online' : 'offline'}"></span>
           <div class="profile-meta-text">
-            <strong>${p.name}</strong>
+            <strong>${p.name} ${coolBadge}</strong>
             <small>${url} • Thư mục: ${p.dirName}</small>
           </div>
         </div>
         <div class="profile-actions">
+          ${coolSec > 0 ? `<button type="button" class="btn btn-warning btn-sm" data-reset-cool="${url}">Gỡ nghỉ</button>` : ''}
           <button type="button" class="btn btn-primary btn-sm" data-launch-profile="${p.id}">▶ Mở Chrome</button>
           <button type="button" class="btn btn-secondary btn-sm" data-assign-w="1" data-url="${url}">Gán W1</button>
           <button type="button" class="btn btn-secondary btn-sm" data-assign-w="2" data-url="${url}">Gán W2</button>
@@ -278,6 +286,10 @@ function applySettingsToForm(s) {
   $('cfgLimitChapters').value = s.limitChapters ?? 0;
   $('cfgForceRerun').checked = Boolean(s.forceRerun);
 
+  $('cfgRotateProfileOnLimit').checked = s.rotateProfileOnLimit !== false;
+  $('cfgAutoLaunchProfile').checked = s.autoLaunchProfileOnRotate !== false;
+  $('cfgProfileCooldownMin').value = s.profileCooldownMin ?? 30;
+
   const w1 = s.workers[0] || {};
   const w2 = s.workers[1] || {};
   if (w1.cdpUrl) $('w1CdpUrl').value = w1.cdpUrl;
@@ -353,6 +365,9 @@ function collectSettingsFromForm() {
     mergeGap: $('cfgMergeGap').value,
     aacBitrate: $('cfgAacBitrate').value,
     maxWaitUploadSec: Number($('cfgMaxWaitUploadSec').value || 300),
+    rotateProfileOnLimit: $('cfgRotateProfileOnLimit').checked,
+    autoLaunchProfileOnRotate: $('cfgAutoLaunchProfile').checked,
+    profileCooldownMin: Number($('cfgProfileCooldownMin').value || 30),
     chromeProfiles,
     workers: [
       {
@@ -461,6 +476,7 @@ function renderState(state) {
   });
 
   renderModelsList();
+  renderChromeProfilesUI();
 }
 
 function renderSummary(summary) {
@@ -629,8 +645,30 @@ function bindEvents() {
     }
   });
 
-  // Delegated click handler for launching / assigning / deleting any Chrome profile
+  // Reset all profile cooldowns
+  $('btnResetAllProfileCooldowns').addEventListener('click', async () => {
+    try {
+      const res = await api('/api/profiles/reset-cooldown', 'POST', {});
+      renderState(res.state);
+    } catch (err) {
+      alert(`Lỗi gỡ Cooldown: ${err.message}`);
+    }
+  });
+
+  // Delegated click handler for launching / assigning / deleting / resetting any Chrome profile
   document.body.addEventListener('click', async (e) => {
+    const resetBtn = e.target.closest('[data-reset-cool]');
+    if (resetBtn) {
+      const cdpUrl = resetBtn.dataset.resetCool;
+      try {
+        const res = await api('/api/profiles/reset-cooldown', 'POST', { cdpUrl });
+        renderState(res.state);
+      } catch (err) {
+        alert(`Lỗi gỡ Cooldown: ${err.message}`);
+      }
+      return;
+    }
+
     const launchBtn = e.target.closest('[data-launch-profile]');
     if (launchBtn) {
       const profileId = launchBtn.dataset.launchProfile;

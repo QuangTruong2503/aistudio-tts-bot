@@ -256,6 +256,29 @@
         <!-- Tab: Chrome Profiles Manager -->
         <div class="stab-content" id="tab-profiles">
           <div class="subcard">
+            <h4>🔄 Luân phiên Hồ sơ Tự động khi Chạm Giới hạn</h4>
+            <div class="checkbox-group-row">
+              <label class="checkbox-label">
+                <input type="checkbox" id="cfgRotateProfileOnLimit" />
+                <span><strong>Tự động chuyển sang hồ sơ Chrome khác</strong> khi hồ sơ hiện tại hết quota tất cả model hoặc bị yêu cầu xác minh tài khoản</span>
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="cfgAutoLaunchProfile" />
+                <span>Tự động khởi chạy cửa sổ Chrome nếu hồ sơ kế tiếp đang ở trạng thái Offline</span>
+              </label>
+            </div>
+            <div class="form-row two-col">
+              <div class="form-group">
+                <label>Thời gian tạm nghỉ hồ sơ vừa chạm giới hạn (phút)</label>
+                <input type="number" id="cfgProfileCooldownMin" min="1" max="1440" step="5" value="30" />
+              </div>
+              <div class="form-group profile-create-btn-wrap">
+                <button type="button" id="btnResetAllProfileCooldowns" class="btn btn-secondary btn-sm">↻ Gỡ toàn bộ Cooldown Hồ sơ</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="subcard">
             <h4>Tạo Hồ sơ Chrome mới (Tài khoản Google riêng biệt)</h4>
             <p class="hint-text">Mỗi hồ sơ lưu cookies & phiên đăng nhập Google AI Studio riêng trên một cổng Debug độc lập (9222, 9223, 9224...).</p>
             <div class="form-row profile-create-row">

@@ -26,6 +26,8 @@ const {
   ensureSceneFilled,
   getCurrentModel,
   switchTtsModel,
+  checkCdpEndpoint,
+  launchChromeDebugInstance,
 } = require('./browser');
 const { processSingleFile } = require('./automation');
 const { publishAudioToCms } = require('./publisher');
@@ -64,6 +66,8 @@ class AutomationEngine extends EventEmitter {
 
     // Per-CDP model cooldown maps: Map<cdpUrl, Map<modelName, cooldownUntilMs>>
     this.cooldownsByCdp = new Map();
+    // Per-Chrome-Profile cooldown map: Map<cdpUrl, cooldownUntilMs>
+    this.profileCooldownUntil = new Map();
 
     this.recentLogs = [];
     this.maxRecentLogs = 400;
@@ -188,6 +192,28 @@ class AutomationEngine extends EventEmitter {
     });
   }
 
+  getProfileCooldownsSnapshot(settings) {
+    const now = Date.now();
+    const out = {};
+    for (const p of settings?.chromeProfiles || []) {
+      const url = `http://127.0.0.1:${p.port}`;
+      const until = this.profileCooldownUntil.get(url) || 0;
+      out[url] = until > now ? Math.ceil((until - now) / 1000) : 0;
+    }
+    return out;
+  }
+
+  resetProfileCooldown(cdpUrl) {
+    if (cdpUrl) {
+      this.profileCooldownUntil.delete(cdpUrl);
+      this.cooldownsByCdp.delete(cdpUrl);
+    } else {
+      this.profileCooldownUntil.clear();
+      this.cooldownsByCdp.clear();
+    }
+    this._emitState();
+  }
+
   getSnapshot() {
     const settings = loadSettings(baseConfig.logsDir);
     return {
@@ -196,6 +222,7 @@ class AutomationEngine extends EventEmitter {
       stats: { ...this.stats },
       workers: this.workersState.map((w) => ({ ...w })),
       modelsHealth: this.getModelHealthSnapshot(settings),
+      profileCooldowns: this.getProfileCooldownsSnapshot(settings),
       failedCount: loadFailedEntries(baseConfig.logsDir).length,
     };
   }
@@ -252,6 +279,80 @@ class AutomationEngine extends EventEmitter {
       }
     }
     return best;
+  }
+
+  /**
+   * Pick the next available Chrome profile when the current profile hits its account/quota limit.
+   * Prefers profiles that are: (1) not in cooldown, (2) not actively used by sibling worker, (3) already Online.
+   * If none are Online and `autoLaunchProfileOnRotate` is enabled, launches the next non-cooldown profile.
+   */
+  async _pickNextProfile(currentCdpUrl, settings, workerId, wLogger) {
+    const profiles = Array.isArray(settings.chromeProfiles) ? settings.chromeProfiles : [];
+    if (profiles.length <= 1) return null;
+
+    const now = Date.now();
+    const currentIdx = Math.max(
+      0,
+      profiles.findIndex((p) => `http://127.0.0.1:${p.port}` === currentCdpUrl)
+    );
+
+    const siblingUrls = new Set(
+      this.workersState
+        .filter((w) => w.id !== workerId && w.active && w.cdpUrl)
+        .map((w) => w.cdpUrl)
+    );
+
+    // Build circularly ordered candidates (excluding current profile and profiles in cooldown)
+    const candidates = [];
+    for (let offset = 1; offset < profiles.length; offset++) {
+      const p = profiles[(currentIdx + offset) % profiles.length];
+      const url = `http://127.0.0.1:${p.port}`;
+      if ((this.profileCooldownUntil.get(url) || 0) > now) continue;
+      candidates.push({ profile: p, url, isSiblingUsing: siblingUrls.has(url) });
+    }
+
+    if (candidates.length === 0) return null;
+
+    // Sort: free profiles (not used by sibling) first
+    candidates.sort((a, b) => Number(a.isSiblingUsing) - Number(b.isSiblingUsing));
+
+    // Pass 1: look for a candidate that is already Online
+    for (const cand of candidates) {
+      const probe = await checkCdpEndpoint(cand.url, 1500);
+      if (probe.online) {
+        return cand;
+      }
+    }
+
+    // Pass 2: if allowed, auto-launch the top candidate profile and wait for CDP to come up
+    if (settings.autoLaunchProfileOnRotate) {
+      const target = candidates[0];
+      const firstModel =
+        (settings.enabledModels && settings.enabledModels[0]) || 'gemini-3.8-flash-tts';
+      wLogger.warn(
+        `Hồ sơ "${target.profile.name}" (:${target.profile.port}) đang tắt -> tự động mở Chrome Debug...`
+      );
+      try {
+        launchChromeDebugInstance({
+          port: target.profile.port,
+          dirName: target.profile.dirName,
+          model: firstModel,
+        });
+
+        const waitDeadline = Date.now() + 12000;
+        while (Date.now() < waitDeadline && !this.stopRequested) {
+          await sleep(800);
+          const probe = await checkCdpEndpoint(target.url, 1500);
+          if (probe.online) {
+            return target;
+          }
+        }
+      } catch (err) {
+        wLogger.error(`Không thể tự mở hồ sơ "${target.profile.name}": ${err.message}`);
+      }
+    }
+
+    return null;
   }
 
   _buildRuntimeConfig(settings, workerCfg) {
@@ -593,13 +694,75 @@ class AutomationEngine extends EventEmitter {
       return;
     }
 
-    const { browser, page, release } = session;
+    let { browser, page, release } = session;
     let currentModel = await getCurrentModel(page, runtimeConfig);
     this._updateWorker(workerId, {
       currentModel,
       phase: 'idle',
       lastMessage: 'Đã kết nối, bắt đầu lấy chương...',
     });
+
+    const tryRotateToAnotherProfile = async (reasonLabel) => {
+      if (!settings.rotateProfileOnLimit) return false;
+      const coolMs = Math.max(1, Number(settings.profileCooldownMin || 30)) * 60 * 1000;
+      const oldUrl = runtimeConfig.cdpUrl;
+      this.profileCooldownUntil.set(oldUrl, Date.now() + coolMs);
+      this._emitState();
+
+      wLogger.warn(
+        `Hồ sơ hiện tại (${oldUrl}) ${reasonLabel} -> tạm nghỉ ${Math.round(coolMs / 60000)} phút và tìm hồ sơ Chrome khả dụng khác...`
+      );
+
+      const nextCand = await this._pickNextProfile(oldUrl, settings, workerId, wLogger);
+      if (!nextCand) {
+        wLogger.warn('Không còn hồ sơ Chrome khả dụng nào khác ngoài cooldown.');
+        return false;
+      }
+
+      this._updateWorker(workerId, {
+        phase: 'switching_profile',
+        lastMessage: `Đang chuyển sang hồ sơ "${nextCand.profile.name}" (:${nextCand.profile.port})...`,
+      });
+
+      try {
+        await release();
+        const freshModel = runtimeConfig.ttsModels[0] || currentModel;
+        const newSession = await this.uiLocks.runExclusive(nextCand.url, () =>
+          acquireWorkerPage(
+            nextCand.url,
+            {
+              initialModel: freshModel,
+              voiceName: effectiveVoice,
+              voiceStyle: effectiveStyle,
+              scenePrompt: effectiveScene,
+              claimedPages: this.claimedPages,
+            },
+            runtimeConfig,
+            wLogger
+          )
+        );
+
+        browser = newSession.browser;
+        page = newSession.page;
+        release = newSession.release;
+        runtimeConfig.cdpUrl = nextCand.url;
+        currentModel = await getCurrentModel(page, runtimeConfig);
+
+        wLogger.success(
+          `Đã luân phiên sang hồ sơ "${nextCand.profile.name}" (${nextCand.url}) | Model: ${currentModel}`
+        );
+        this._updateWorker(workerId, {
+          cdpUrl: nextCand.url,
+          currentModel,
+          phase: 'generating',
+          lastMessage: `Đã chuyển sang ${nextCand.profile.name} (:${nextCand.profile.port})`,
+        });
+        return true;
+      } catch (rotErr) {
+        wLogger.error(`Lỗi khi chuyển sang hồ sơ "${nextCand.profile.name}": ${rotErr.message}`);
+        return false;
+      }
+    };
 
     try {
       while (!this.stopRequested) {
@@ -752,6 +915,8 @@ class AutomationEngine extends EventEmitter {
           const maxAttempts = runtimeConfig.maxRetries + 1;
           const triedModelsForPart = new Set([currentModel]);
           let modelSwitches = 0;
+          let profileSwitches = 0;
+          const maxProfileSwitches = Math.max(1, (settings.chromeProfiles || []).length);
 
           for (let attempt = 1; attempt <= maxAttempts; attempt++) {
             if (this.stopRequested) break;
@@ -789,6 +954,19 @@ class AutomationEngine extends EventEmitter {
                 wLogger.error(
                   `Tài khoản tại ${runtimeConfig.cdpUrl} yêu cầu xác minh: https://aistudio.google.com/verify-account`
                 );
+                if (
+                  settings.rotateProfileOnLimit &&
+                  profileSwitches < maxProfileSwitches &&
+                  (await tryRotateToAnotherProfile('yêu cầu xác minh tài khoản'))
+                ) {
+                  profileSwitches += 1;
+                  triedModelsForPart.clear();
+                  triedModelsForPart.add(currentModel);
+                  modelSwitches = 0;
+                  attempt -= 1;
+                  await this._interruptibleSleep(1500);
+                  continue;
+                }
                 if (runtimeConfig.stopOnAccountVerifyError) {
                   stopWorkerFatal = true;
                 }
@@ -844,7 +1022,33 @@ class AutomationEngine extends EventEmitter {
                   } catch (switchErr) {
                     wLogger.error(`Lỗi đổi model "${nextModel}": ${switchErr.message}`);
                   }
+                } else if (
+                  settings.rotateProfileOnLimit &&
+                  profileSwitches < maxProfileSwitches &&
+                  (await tryRotateToAnotherProfile('hết quota tất cả các model'))
+                ) {
+                  // All models on current Chrome profile exhausted -> rotate to another Chrome profile!
+                  profileSwitches += 1;
+                  triedModelsForPart.clear();
+                  triedModelsForPart.add(currentModel);
+                  modelSwitches = 0;
+                  attempt -= 1;
+                  await this._interruptibleSleep(1500);
+                  continue;
                 }
+              } else if (
+                isQuota &&
+                settings.rotateProfileOnLimit &&
+                profileSwitches < maxProfileSwitches &&
+                (await tryRotateToAnotherProfile('đạt giới hạn quota'))
+              ) {
+                profileSwitches += 1;
+                triedModelsForPart.clear();
+                triedModelsForPart.add(currentModel);
+                modelSwitches = 0;
+                attempt -= 1;
+                await this._interruptibleSleep(1500);
+                continue;
               }
 
               if (attempt < maxAttempts) {

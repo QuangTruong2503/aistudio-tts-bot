@@ -263,6 +263,17 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, settings: saved, summary });
     }
 
+    if (req.method === 'POST' && pathname === '/api/profiles/reset-cooldown') {
+      const body = await readJsonBody(req);
+      engine.resetProfileCooldown(body.cdpUrl || null);
+      engine.rootLogger.info(
+        body.cdpUrl
+          ? `Đã gỡ Cooldown cho hồ sơ ${body.cdpUrl}.`
+          : 'Đã gỡ Cooldown cho toàn bộ hồ sơ Chrome.'
+      );
+      return sendJson(res, 200, { ok: true, state: engine.getSnapshot() });
+    }
+
     if (req.method === 'POST' && pathname === '/api/open-folder') {
       const body = await readJsonBody(req);
       const settings = loadSettings(baseConfig.logsDir);

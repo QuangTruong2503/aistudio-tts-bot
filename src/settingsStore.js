@@ -104,6 +104,11 @@ function getDefaultSettings() {
     limitChapters: 0, // 0 = không giới hạn (chạy hết)
     forceRerun: false,
 
+    // Luân phiên tự động giữa các hồ sơ Chrome khi hồ sơ hiện tại chạm giới hạn / cần xác minh
+    rotateProfileOnLimit: true,
+    autoLaunchProfileOnRotate: true,
+    profileCooldownMin: 30, // Số phút tạm nghỉ cho hồ sơ vừa chạm giới hạn
+
     // Danh sách hồ sơ Chrome Debug (có thể tạo/xóa không giới hạn)
     chromeProfiles: [
       {

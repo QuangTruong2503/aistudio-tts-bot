@@ -79,9 +79,9 @@ module.exports = {
     aacBitrate: process.env.PUBLISH_AAC_BITRATE || '48k', // '48k' | '64k' | '96k' | '128k'
     selectors: {
       bulkUploadTab: [
-        'button[role="tab"]:has-text("Nhập chương / Upload")',
+        'button[role="tab"]:has-text("Nhập Audio / Upload")',
         'button[role="tab"]:has-text("Nhập chương")',
-        'main button:has-text("Nhập chương / Upload")',
+        'main button:has-text("Nhập Audio / Upload")',
         'main button:has-text("Tải lên hàng loạt")',
         'button:has-text("Bulk Upload")',
       ],
@@ -91,6 +91,7 @@ module.exports = {
         'button:has-text("Danh sách chương")',
       ],
       autoMergeCheckbox: [
+        'main [role="tabpanel"] input[type="checkbox"]',
         'main label:has-text("Tự động nhận diện & ghép") input[type="checkbox"]',
         'div[role="tabpanel"] input[type="checkbox"]',
       ],
@@ -101,12 +102,14 @@ module.exports = {
         '#aac-bitrate-select',
       ],
       fileInput: [
+        'main [role="tabpanel"] input[type="file"]',
         'div[role="tabpanel"] input[type="file"]',
         'main input[type="file"]',
         'input[type="file"]',
       ],
       uploadSubmitButton: [
         'main button:has-text("Bắt đầu (")',
+        'main button:has-text("Bắt đầu (1)")',
         'main button:has-text("Bắt đầu")',
         'main button:has-text("Tải lên tất cả")',
         'main button:has-text("Tải lên ngay")',
@@ -114,8 +117,8 @@ module.exports = {
         'main button:has-text("Đăng chương")',
         'main button:has-text("Lưu chương")',
         'main button[type="submit"]',
-        'main button:has-text("Tải lên"):not(:has-text("hàng loạt")):not(:has-text("Bulk Upload")):not(:has-text("Nhập chương"))',
-        'main button:has-text("Upload"):not(:has-text("hàng loạt")):not(:has-text("Bulk Upload")):not(:has-text("Nhập chương"))',
+        'main button:has-text("Tải lên"):not(:has-text("hàng loạt")):not(:has-text("Bulk Upload")):not(:has-text("Nhập chương")):not(:has-text("Nhập Audio"))',
+        'main button:has-text("Upload"):not(:has-text("hàng loạt")):not(:has-text("Bulk Upload")):not(:has-text("Nhập chương")):not(:has-text("Nhập Audio"))',
       ],
       clearQueueButton: [
         'main button:has-text("Xóa danh sách")',
